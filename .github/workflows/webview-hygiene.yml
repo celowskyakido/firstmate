@@ -1,0 +1,28 @@
+name: Webview hygiene
+on:
+  pull_request:
+    paths: ['webview/**']
+
+permissions:
+  contents: read
+
+jobs:
+  denylist:
+    name: No real data under webview/
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test suite
+        run: node --test webview/tests/*.test.js
+      - name: Denylist scan
+        run: |
+          # Heuristic net for real data leaking into fixtures or docs; README.md states the rule and is exempt.
+          # Bracketed letters keep this file from matching its own patterns.
+          hits=$(grep -rnIP \
+            '\b(?!(DEMO|ACME|UTF|SHA|ISO)-)[A-Z]{2,10}-[0-9]+\b|(?i)[a]kido|\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b' \
+            webview --exclude=README.md || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::possible real data under webview/ (see fork hygiene in webview/README.md)"
+            exit 1
+          fi

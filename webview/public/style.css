@@ -1,0 +1,15 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0 auto; max-width: 70rem; padding: 0 1rem 3rem; }
+header { display: flex; gap: 1.5rem; align-items: baseline; flex-wrap: wrap; }
+nav a { margin-right: 1rem; }
+#freshness { margin-left: auto; opacity: .7; font-size: .85rem; }
+#banner { background: #b00020; color: #fff; padding: .5rem 1rem; border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8884; vertical-align: top; }
+.state { font-weight: 600; }
+.state-working { color: #1a7f37; }
+.state-blocked, .state-failed { color: #b00020; }
+.state-paused, .state-parked { color: #9a6700; }
+.needs-captain { background: #ffb30022; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding: .5rem; }
+.muted { opacity: .7; }

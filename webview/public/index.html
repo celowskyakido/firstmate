@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firstmate web view</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Firstmate</h1>
+    <nav>
+      <a href="#/" data-route="overview">Fleet</a>
+      <a href="#/decisions" data-route="decisions">Decisions <span id="decision-count"></span></a>
+    </nav>
+    <span id="freshness" role="status"></span>
+  </header>
+  <div id="banner" role="alert" hidden></div>
+  <main id="view"></main>
+  <script src="/render.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
