@@ -3243,6 +3243,22 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+# Worker copy seeding (docs/configuration.md "Worker copy seeding"): a
+# captain-private manifest replaces the committed .worktreeinclude for this
+# acquisition. Treehouse before 3.0.0 has no --include-file, so a manifest the
+# installed treehouse cannot honor refuses the spawn rather than launching a
+# worker without the files the captain asked to seed.
+SPAWN_TREEHOUSE_GET='treehouse get'
+SPAWN_INCLUDE_FILE="$CONFIG/worktree-include/$(basename "$PROJ_ABS")"
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -f "$SPAWN_INCLUDE_FILE" ]; then
+  SPAWN_INCLUDE_FILE="$(cd -P "${SPAWN_INCLUDE_FILE%/*}" && pwd)/${SPAWN_INCLUDE_FILE##*/}"
+  spawn_treehouse_major=$(treehouse --version 2>/dev/null | sed -nE 's/^[^0-9]*([0-9]+)\.[0-9]+\.[0-9]+.*/\1/p' | head -n 1)
+  if [ -z "$spawn_treehouse_major" ] || [ "$spawn_treehouse_major" -lt 3 ]; then
+    echo "error: spawn refused: $SPAWN_INCLUDE_FILE asks to seed ignored files into the worker copy, which needs treehouse >= 3.0.0 (installed: $(treehouse --version 2>/dev/null || echo none)); upgrade treehouse or remove that manifest" >&2
+    exit 1
+  fi
+  SPAWN_TREEHOUSE_GET="treehouse get --include-file $(shell_quote "$SPAWN_INCLUDE_FILE")"
+fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -4571,7 +4587,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" "$SPAWN_TREEHOUSE_GET"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
