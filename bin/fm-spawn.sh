@@ -4,6 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   Every Claude spawn also accepts --mcp inherit|none (see "Claude worker MCP servers" below).
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -359,6 +360,14 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Claude worker MCP servers (config/claude-worker-mcp, --mcp inherit|none):
+#   `inherit` (the default) launches claude exactly as before, so it loads every
+#   user and plugin MCP server; `none` adds --strict-mcp-config with no
+#   --mcp-config, so no MCP server process starts. The file applies to ship
+#   workers only; scouts and secondmates (which may need MCP) stay `inherit`
+#   unless --mcp is passed, and --mcp overrides the file for any kind. An
+#   invalid file value or --mcp value refuses before any endpoint or record.
+#   docs/configuration.md "Claude worker MCP servers" owns the contract.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
@@ -639,6 +648,24 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+CLAUDE_MCP_FILE=inherit
+if ! CLAUDE_MCP_PRESENT=$(fm_config_source_present "$CONFIG/claude-worker-mcp"); then
+  exit 1
+fi
+if [ "$CLAUDE_MCP_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/claude-worker-mcp" ] || [ ! -r "$CONFIG/claude-worker-mcp" ]; then
+    echo "error: config/claude-worker-mcp must be a readable regular file holding one of: inherit, none" >&2
+    exit 1
+  fi
+  CLAUDE_MCP_FILE=$(tr -d '[:space:]' <"$CONFIG/claude-worker-mcp" || true)
+  case "$CLAUDE_MCP_FILE" in
+  inherit | none) ;;
+  *)
+    echo "error: config/claude-worker-mcp holds '$CLAUDE_MCP_FILE'; accepted values are: inherit (every MCP server loads, the default when the file is absent), none (--strict-mcp-config, no MCP server starts)" >&2
+    exit 1
+    ;;
+  esac
+fi
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
 # every worker reaches the same server instead of starting a second one.
@@ -734,6 +761,7 @@ BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
+MCP_ARG=
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -784,6 +812,16 @@ for a in "$@"; do
     upstream-consent)
       UPSTREAM_CONSENT=$a
       UPSTREAM_CONSENT_SET=1
+      ;;
+    mcp)
+      MCP_ARG=$a
+      case "$MCP_ARG" in
+      inherit | none) ;;
+      *)
+        echo "error: --mcp must be inherit or none (got '$MCP_ARG')" >&2
+        exit 1
+        ;;
+      esac
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -852,6 +890,17 @@ for a in "$@"; do
   --upstream-consent=*)
     UPSTREAM_CONSENT=${a#--upstream-consent=}
     UPSTREAM_CONSENT_SET=1
+    ;;
+  --mcp) want_value=mcp ;;
+  --mcp=*)
+    MCP_ARG=${a#--mcp=}
+    case "$MCP_ARG" in
+    inherit | none) ;;
+    *)
+      echo "error: --mcp must be inherit or none (got '$MCP_ARG')" >&2
+      exit 1
+      ;;
+    esac
     ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
@@ -5440,6 +5489,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
+CLAUDE_MCP=${MCP_ARG:-inherit}
+[ -n "$MCP_ARG" ] || [ "$KIND" != ship ] || CLAUDE_MCP=$CLAUDE_MCP_FILE
+[ "$CLAUDE_MCP" != none ] || CLAUDE_PERM_FLAG="$CLAUDE_PERM_FLAG --strict-mcp-config"
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 case "$LAUNCH" in
 *__CLAUDESETTINGS__*)

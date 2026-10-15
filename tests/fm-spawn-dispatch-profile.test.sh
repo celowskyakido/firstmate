@@ -2254,6 +2254,67 @@ test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata() {
   pass "an unrecognized config/claude-permission-mode token refuses before any endpoint or metadata"
 }
 
+# config/claude-worker-mcp and --mcp (bin/fm-spawn.sh header): `none` adds only
+# --strict-mcp-config for ships; scouts and secondmates stay inherit unless
+# --mcp is passed; absent/inherit is the unchanged launch; bad values refuse.
+mcp_case_launch() {  # <name> <file-content|-> [spawn-args...]
+  local name=$1 content=$2 id rec
+  shift 2
+  id="$name-z30"
+  rec=$(make_spawn_case "$name" claude "$id")
+  read_case_record "$rec"
+  [ "$content" = - ] || printf '%s\n' "$content" > "$HOME_DIR/config/claude-worker-mcp"
+  MCP_ID=$id
+  if [ "${1:-}" = --scout ]; then
+    MCP_OUT=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$@")
+  else
+    MCP_OUT=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$@")
+  fi
+  MCP_STATUS=$?
+  MCP_LAUNCH=$(cat "$LAUNCH_LOG" 2>/dev/null || true)
+}
+
+test_claude_worker_mcp() {
+  local expected
+  mcp_case_launch mcp-absent -
+  expect_code 0 "$MCP_STATUS" "absent claude-worker-mcp spawn should succeed"
+  expected=$(claude_expected_launch "$MCP_LAUNCH" "$HOME_DIR" "$MCP_ID" --dangerously-skip-permissions)
+  [ "$MCP_LAUNCH" = "$expected" ] || fail "absent claude-worker-mcp changed the launch"
+  assert_not_contains "$MCP_LAUNCH" "--strict-mcp-config" "absent file must not strip MCP"
+
+  mcp_case_launch mcp-inherit inherit
+  expected=$(claude_expected_launch "$MCP_LAUNCH" "$HOME_DIR" "$MCP_ID" --dangerously-skip-permissions)
+  [ "$MCP_LAUNCH" = "$expected" ] || fail "explicit inherit changed the launch"
+
+  mcp_case_launch mcp-none '  none'
+  expect_code 0 "$MCP_STATUS" "claude-worker-mcp=none ship spawn should succeed"
+  expected=$(claude_expected_launch "$MCP_LAUNCH" "$HOME_DIR" "$MCP_ID" '--dangerously-skip-permissions --strict-mcp-config')
+  [ "$MCP_LAUNCH" = "$expected" ] || fail "none must add only --strict-mcp-config"$'\n'"$MCP_LAUNCH"
+  assert_not_contains "$MCP_LAUNCH" "--mcp-config" "none must not name an MCP config"
+
+  mcp_case_launch mcp-flag-inherit none --mcp inherit
+  assert_not_contains "$MCP_LAUNCH" "--strict-mcp-config" "--mcp inherit must override the file"
+  mcp_case_launch mcp-flag-none inherit --mcp=none
+  assert_contains "$MCP_LAUNCH" "--strict-mcp-config" "--mcp none must override the file"
+
+  mcp_case_launch mcp-scout none --scout
+  expect_code 0 "$MCP_STATUS" "scout spawn under claude-worker-mcp=none should succeed"
+  assert_not_contains "$MCP_LAUNCH" "--strict-mcp-config" "the file must not apply to scouts"
+  mcp_case_launch mcp-scout-flag - --scout --mcp none
+  assert_contains "$MCP_LAUNCH" "--strict-mcp-config" "--mcp none must apply to a scout"
+
+  mcp_case_launch mcp-badfile bogus
+  expect_code 1 "$MCP_STATUS" "an invalid claude-worker-mcp token must refuse"
+  assert_contains "$MCP_OUT" "config/claude-worker-mcp holds 'bogus'" "refusal must name the file and token"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an invalid claude-worker-mcp must launch nothing"
+  assert_absent "$HOME_DIR/state/$MCP_ID.meta" "refusal must happen before meta is written"
+
+  mcp_case_launch mcp-badflag - --mcp bogus
+  expect_code 1 "$MCP_STATUS" "an invalid --mcp value must refuse"
+  assert_contains "$MCP_OUT" "--mcp must be inherit or none" "refusal must name the flag"
+  pass "config/claude-worker-mcp and --mcp select --strict-mcp-config for ships, overridable, scouts unaffected"
+}
+
 test_non_claude_harness_ignores_claude_permission_mode() {
   local rec id out status launch
   id=permmode-codex-z23
@@ -2332,6 +2393,7 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
+test_claude_worker_mcp
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority

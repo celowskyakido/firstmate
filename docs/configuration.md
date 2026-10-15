@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude worker MCP servers](#claude-worker-mcp-servers-configclaude-worker-mcp), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -929,6 +929,27 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Claude worker MCP servers (config/claude-worker-mcp)
+
+The optional local, gitignored `config/claude-worker-mcp` decides whether a Claude ship worker loads the operator's MCP servers.
+Each Claude session otherwise starts a helper process per configured user and plugin MCP server, which adds up to hundreds of processes and several GB across a busy fleet, while most workers only use shell tools.
+
+| Token | Launch effect |
+| --- | --- |
+| `inherit` | Unchanged: every user and plugin MCP server loads |
+| `none` | Adds `--strict-mcp-config` with no `--mcp-config`, so no MCP server starts |
+
+An absent file is `inherit`, byte-identical to the launch before this setting existed.
+The token is the file's whitespace-trimmed content; any other value, or an unreadable file, refuses the spawn before any endpoint, worktree, or task record exists.
+
+The file applies to ship workers only.
+Scouts and secondmates stay `inherit` unless the spawn passes `--mcp inherit|none`, because scouts commonly query Datadog, LaunchDarkly, Jira, or Slack through MCP.
+`--mcp` overrides the file for any kind of Claude spawn.
+The file is read on every spawn and relaunch and is not inherited into secondmate homes.
+
+A `none` worker cannot call MCP tools.
+Brief MCP-needing work as a scout, or spawn the ship with `--mcp inherit`.
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
