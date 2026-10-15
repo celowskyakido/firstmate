@@ -8,6 +8,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const resourcesLib = require('./resources');
+const history = require('./history');
+const R = require('./public/render');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
 const HOST = '127.0.0.1';
@@ -17,12 +19,15 @@ const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/render.js': ['render.js', 'text/javascript; charset=utf-8'],
+  '/charts.js': ['charts.js', 'text/javascript; charset=utf-8'],
+  '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
 };
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const TAIL_LINES = 200;
 const TAIL_BYTES = 64 * 1024;
 const INBOX_TEXT_BYTES = 4 * 1024;
+const HISTORY_POINTS = 360;
 
 const parseSnapshot = (stdout) => {
   let snapshot;
@@ -73,8 +78,8 @@ const fetchSnapshot = (script, home, timeoutMs) => {
 
 // The next run is scheduled only after the current one settles, so refreshes
 // never overlap; on a big home one snapshot run can take most of a minute.
-// `startRun` returns { done, cancel }.
-const makePoller = (startRun, pollMs) => {
+// `startRun` returns { done, cancel }; `onValue` sees each successful value.
+const makePoller = (startRun, pollMs, onValue = () => {}) => {
   const state = { value: null, version: 0, fetchedAt: null, error: null, refreshing: false, failures: 0 };
   let timer = null;
   let running = null;
@@ -88,6 +93,8 @@ const makePoller = (startRun, pollMs) => {
       state.fetchedAt = new Date().toISOString();
       state.error = null;
       state.failures = 0;
+      // A trend-sampling bug must not mark a good refresh as failed.
+      try { onValue(state.value); } catch (e) { console.error(`webview: history sample failed: ${e.message}`); }
     } catch (e) {
       state.error = e.message;
       state.failures += 1;
@@ -130,12 +137,16 @@ const readInbox = async (dir) => {
 
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
-  resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(),
+  resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
 }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
-  const snapshots = makePoller(() => fetchSnapshot(snapshotScript, home, snapshotTimeoutMs), pollMs);
-  const resources = makePoller(() => ({ done: collectResources(), cancel: () => {} }), resourcesPollMs);
+  const fleetTrend = history.makeSeries({ windowMs: historyWindowMs, sampleMs: pollMs });
+  const machineTrend = history.makeSeries({ windowMs: historyWindowMs, sampleMs: resourcesPollMs });
+  const snapshots = makePoller(() => fetchSnapshot(snapshotScript, home, snapshotTimeoutMs), pollMs,
+    (snapshot) => fleetTrend.push(R.fleetCounts(snapshot)));
+  const resources = makePoller(() => ({ done: collectResources(), cancel: () => {} }), resourcesPollMs,
+    (reading) => machineTrend.push(R.machineSample(reading)));
 
   const send = (res, status, type, body, extra = {}) => {
     res.writeHead(status, {
@@ -174,6 +185,11 @@ async function start({
       }
       if (pathname === '/api/snapshot') return sendCached(res, snapshots.state, 'Snapshot');
       if (pathname === '/api/resources') return sendCached(res, resources.state, 'Resources');
+      if (pathname === '/api/history') {
+        return sendJson(res, 200, {
+          windowMs: historyWindowMs, fleet: fleetTrend.read(HISTORY_POINTS), machine: machineTrend.read(HISTORY_POINTS),
+        });
+      }
       const match = pathname.match(/^\/api\/task\/([^/]+)$/);
       if (match) {
         const id = decodeURIComponent(match[1]);

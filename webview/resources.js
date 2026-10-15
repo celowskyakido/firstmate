@@ -124,7 +124,7 @@ const alerts = ({ load, memory, processes, sessions, orphans: lost }) => [
     && `Memory under heavy pressure: ${pct(memory.compressedShare)} compressed. Close the largest sessions below.`,
   ...sessions.filter((s) => s.rssBytes > LIMITS.sessionRssBytes).map((s) => `Session ${s.cwd ?? `pid ${s.pid}`} is using ${gb(s.rssBytes)} of memory. Check its MCP helpers and child processes.`),
   sessions.length > LIMITS.claudeSessions && `${sessions.length} Claude sessions are running (more than ${LIMITS.claudeSessions}). Close the ones no longer needed.`,
-  lost.length && `${lost.length} orphaned helper process${lost.length === 1 ? ' is' : 'es are'} still running with no parent. See the orphans list.`,
+  lost.length && `${lost.length} orphaned helper process${lost.length === 1 ? ' is' : 'es are'} still running with no parent. See the stray helpers list on the Machine page.`,
 ].filter(Boolean);
 
 const run = (cmd, args, timeout) => new Promise((resolve, reject) => {

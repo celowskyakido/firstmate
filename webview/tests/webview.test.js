@@ -64,6 +64,14 @@ test('server: snapshot proxy, task detail, and guards', async (t) => {
   assert.deepEqual([res.status, JSON.parse(res.body).alerts, res.headers['x-resources-version']], [200, ['demo alert'], '1']);
   assert.equal((await get(port, '/api/resources', { method: 'POST' })).status, 405);
 
+  const trend = JSON.parse((await get(port, '/api/history')).body);
+  assert.equal(trend.windowMs, 3 * 3600_000);
+  assert.deepEqual(Object.keys(trend.fleet[0]), ['t', ...Object.keys(R.fleetCounts(real))]);
+  assert.equal(trend.fleet[0].needsDecision, 2);
+  assert.deepEqual([trend.machine.length, trend.machine[0].sessions], [1, null], 'a partial reading samples as missing, not zero');
+  assert.equal((await get(port, '/api/history', { method: 'POST' })).status, 405);
+  for (const file of ['/charts.js', '/theme.js']) assert.equal((await get(port, file)).status, 200, file);
+
   assert.equal((await get(port, '/api/task/nope')).status, 404);
   assert.equal((await get(port, '/api/task/..%2F..%2Fetc')).status, 404);
   assert.equal((await get(port, '/api/snapshot', { method: 'POST' })).status, 405);
@@ -131,7 +139,7 @@ test('client refuses a foreign snapshot schema', () => {
 });
 
 test('client code never uses HTML-injecting sinks', () => {
-  for (const f of ['app.js', 'render.js']) {
+  for (const f of ['app.js', 'render.js', 'charts.js', 'theme.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
     assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/, f);
   }
