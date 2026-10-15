@@ -8,6 +8,10 @@ const GRACE_MS = 3000;
 const POLL_MS = 100;
 // ps ages are whole seconds and the page's copy is up to a refresh old.
 const AGE_SLACK_SECONDS = 5;
+const CHANGED = 'the process changed since the list was shown; refresh and try again';
+
+// Same process: same owner and command, and not younger than when it was seen.
+const isSameProcess = (p, seen) => p.uid === seen.uid && p.args.slice(0, 200) === seen.command && p.ageSeconds + AGE_SLACK_SECONDS >= seen.ageSeconds;
 
 // Why this pid must not be stopped right now, or null when it may be.
 const refusal = (procs, pid, { uid, selfPid, expected }) => {
@@ -20,14 +24,14 @@ const refusal = (procs, pid, { uid, selfPid, expected }) => {
   // A stray must have parent pid 1, so no child of a stray is ever classified; any child means refuse.
   if (procs.some((c) => c.ppid === pid)) return 'it has child processes, which the stray rules do not cover';
   // A different command, or a process younger than the one the page showed, means the pid was reused.
-  if (expected?.command !== p.args.slice(0, 200) || !(p.ageSeconds + AGE_SLACK_SECONDS >= expected?.ageSeconds)) {
-    return 'the process changed since the list was shown; refresh and try again';
-  }
+  if (!isSameProcess(p, { uid: p.uid, command: expected?.command, ageSeconds: expected?.ageSeconds })) return CHANGED;
   return null;
 };
 
 // SIGTERM, wait up to GRACE_MS, then SIGKILL. Returns { outcome, reason? }:
-// terminated, killed, already-gone, refused, or failed.
+// terminated, killed, already-gone, refused, or failed. The pid is re-verified
+// against a fresh process table before SIGKILL, because a helper that exits during
+// the grace period can have its pid reused by an unrelated process.
 const killStray = async (pid, expected, {
   listProcesses = () => resources.listProcesses(), kill = process.kill, uid = process.getuid?.() ?? null, selfPid = process.pid,
   now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), graceMs = GRACE_MS,
@@ -36,6 +40,8 @@ const killStray = async (pid, expected, {
   if (!procs.some((p) => p.pid === pid)) return { outcome: 'already-gone' };
   const reason = refusal(procs, pid, { uid, selfPid, expected });
   if (reason) return { outcome: 'refused', reason };
+  const first = procs.find((p) => p.pid === pid);
+  const seen = { uid: first.uid, command: first.args.slice(0, 200), ageSeconds: first.ageSeconds };
   const isAlive = () => {
     try { kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
   };
@@ -46,6 +52,12 @@ const killStray = async (pid, expected, {
   for (const end = now() + graceMs; now() < end; await sleep(POLL_MS)) {
     if (!isAlive()) return { outcome: 'terminated' };
   }
+  const later = await listProcesses();
+  const current = later.find((p) => p.pid === pid);
+  // A younger process, another owner, or another command under the same pid is a replacement, never signalled.
+  if (!current || !isSameProcess(current, seen)) return { outcome: 'already-gone' };
+  const laterReason = refusal(later, pid, { uid, selfPid, expected: seen });
+  if (laterReason) return { outcome: 'refused', reason: `sent the stop request, but did not force-stop it: ${laterReason}` };
   if (!send('SIGKILL')) return { outcome: 'terminated' };
   await sleep(POLL_MS);
   return isAlive() ? { outcome: 'failed', reason: 'still running after SIGKILL' } : { outcome: 'killed' };

@@ -85,28 +85,40 @@ test('a live hold on a running task makes the task card a decision instead of a 
   assert.deepEqual(all.map((c) => [c.key, c.column, c.decisions.map((d) => d.summary)]), [['task:demo-a', 'decide', ['approve the plan']]]);
 });
 
-test('second mate decisions join the second mate card once, or stand alone, and age by their own hold', () => {
-  const mate = task('demo-mate', 'parked', { kind: 'secondmate', decision: 'from status', age: HOUR });
+test('second mate decisions join the second mate card, replace its relayed copy, and age by their own hold', () => {
+  const mate = task('demo-mate', 'parked', { kind: 'secondmate', decision: 'relayed copy', age: HOUR });
   const all = R.cards(snap([mate], [], { secondmate_current: { records: [
     { id: 'demo-mate', home: "/tmp/demo homes/mate's", remote: false, decisions_open: [
-      { id: 'demo-q', key: 'demo-mate-q', verb: 'needs-decision', summary: 'duplicate of the status one' },
+      { id: 'demo-q', key: 'demo-mate-q', verb: 'needs-decision', summary: 'the second mate record' },
+      { id: 'demo-q', key: 'demo-mate-q', verb: 'needs-decision', summary: 'listed twice' },
       { id: 'demo-hold', key: 'demo-hold', verb: 'captain-hold', summary: 'its own hold', hold_age_days: 5 }] },
     { id: 'demo-remote', home: '/srv/demo/remote', remote: { host: 'demo-host' }, decisions_open: [{ id: 'demo-r', key: 'demo-r', verb: 'captain-hold', summary: 'remote ask', hold_age_days: 1 }] },
   ] } }));
   const own = all.find((c) => c.id === 'demo-mate');
-  assert.deepEqual(own.decisions.map((d) => d.summary), ['from status', 'its own hold']);
+  assert.deepEqual(own.decisions.map((d) => d.summary), ['the second mate record', 'its own hold'], 'structured record replaces the relayed status copy; exact repeats collapse');
   assert.deepEqual([own.column, own.ageSeconds, own.lastUpdateSeconds], ['aging', 5 * DAY, HOUR], 'the 5-day hold ages the card, not the recent update');
   assert.ok(own.badges.includes('Second mate'));
   assert.deepEqual(own.resolve.map((s) => s.text), [
-    'For demo-mate (from status): <your answer>',
-    "bin/fm-send.sh fm-demo-mate --resolve-key demo-mate-q '<your answer>'",
+    'For second mate demo-mate, demo-mate-q (the second mate record): <your answer>',
     'For second mate demo-mate, decision on demo-hold: <your answer>',
     `FM_HOME='/tmp/demo homes/mate'\\''s' bin/fm-captain-hold.sh answer demo-hold --decision-file <file with your answer> --release`,
-  ], 'the main-home status decision steers the second mate; its own hold is answered in its own home');
+  ], 'a second mate record is answered in its own home, never with a main-home command');
   const remote = all.find((c) => c.source === 'secondmate');
   assert.deepEqual([remote.id, remote.column, remote.ageSeconds], ['demo-r', 'decide', DAY]);
   assert.deepEqual(remote.resolve.map((s) => s.text), ['For second mate demo-remote, decision on demo-r: <your answer>'],
     'no command when the owning home is remote, so nothing can run against this home');
+});
+
+test('two children of one second mate that reuse a decision key stay distinct', () => {
+  const children = [{ id: 'demo-child-1', key: 'approval', verb: 'needs-decision', summary: 'approve child one' },
+    { id: 'demo-child-2', key: 'approval', verb: 'needs-decision', summary: 'approve child two' }];
+  const standalone = snap([], [], { secondmate_current: { records: [{ id: 'demo-mate', home: '/tmp/demo/mate', decisions_open: children }] } });
+  const registry = R.cardRegistry(standalone);
+  const keys = [...registry.keys()].filter((k) => k.startsWith('secondmate:'));
+  assert.deepEqual(keys, ['secondmate:demo-mate:demo-child-1:approval', 'secondmate:demo-mate:demo-child-2:approval']);
+  assert.deepEqual(keys.map((k) => registry.get(k).title), ['approve child one', 'approve child two'], 'each key opens its own decision');
+  const withOwner = snap([task('demo-mate', 'parked', { kind: 'secondmate', age: HOUR })], [], { secondmate_current: { records: [{ id: 'demo-mate', decisions_open: children }] } });
+  assert.deepEqual(R.cards(withOwner).find((c) => c.id === 'demo-mate').decisions.map((d) => d.summary), ['approve child one', 'approve child two']);
 });
 
 test('a live hold ages from when it was set, not from the latest worker update', () => {

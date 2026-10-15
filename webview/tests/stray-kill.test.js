@@ -60,6 +60,35 @@ test('a stray that ignores SIGTERM for 3 seconds gets SIGKILL', async () => {
   assert.deepEqual(await killStray(400, expect(procs, 400), deps(procs, stubborn.kill)), { outcome: 'failed', reason: 'still running after SIGKILL' });
 });
 
+test('a pid reused during the grace period is reported gone and never sent SIGKILL', async () => {
+  const first = table();
+  const sent = [];
+  const kill = (pid, signal) => { if (signal) sent.push(signal); };
+  // The stray exits on its own after SIGTERM and an unrelated young process takes its pid.
+  const reused = first.map((p) => (p.pid === 400 ? { ...p, args: 'node /opt/demo/new-server.js', ageSeconds: 1 } : p));
+  const sameCommandYounger = first.map((p) => (p.pid === 400 ? { ...p, ageSeconds: 2 } : p));
+  const withoutIt = first.filter((p) => p.pid !== 400);
+  for (const later of [reused, sameCommandYounger, withoutIt]) {
+    sent.length = 0;
+    let reads = 0;
+    const listProcesses = async () => (reads++ ? later : first);
+    assert.deepEqual(await killStray(400, expect(first, 400), deps(first, kill, { listProcesses })), { outcome: 'already-gone' });
+    assert.deepEqual(sent, ['SIGTERM'], 'SIGTERM only, no SIGKILL to the replacement');
+    assert.equal(reads, 2, 'the table is re-read before escalating');
+  }
+});
+
+test('the same process that becomes ineligible during the grace period is not force-stopped', async () => {
+  const first = table();
+  const sent = [];
+  const kill = (pid, signal) => { if (signal) sent.push(signal); };
+  const adopted = first.map((p) => (p.pid === 400 ? { ...p, ppid: 77 } : p));
+  let reads = 0;
+  const result = await killStray(400, expect(first, 400), deps(first, kill, { listProcesses: async () => (reads++ ? adopted : first) }));
+  assert.deepEqual(result, { outcome: 'refused', reason: 'sent the stop request, but did not force-stop it: it has a parent again, so it is not a stray' });
+  assert.deepEqual(sent, ['SIGTERM']);
+});
+
 test('a stray with any child process is refused, since no child of a stray is itself a stray', async () => {
   const procs = table();
   const k = fakeKill(procs, { SIGTERM: true });

@@ -183,12 +183,15 @@
       const owner = taskCards.get(m.id);
       const home = !m.remote && typeof m.home === 'string' && m.home ? m.home : null;
       (m.decisions_open ?? []).forEach((d) => {
+        // Children of one second mate can reuse a key such as `approval`, so identity is child id plus key.
         const decision = {
-          key: d.key ?? d.id, kind: d.verb ?? 'decision', holdId: d.verb === 'captain-hold' ? d.id : undefined, summary: d.summary ?? d.title ?? '', reason: d.reason ?? null,
+          id: d.id ?? null, key: d.key ?? d.id, kind: d.verb ?? 'decision', holdId: d.verb === 'captain-hold' ? d.id : undefined, summary: d.summary ?? d.title ?? '', reason: d.reason ?? null,
           ageSeconds: d.hold_age_days == null ? null : d.hold_age_days * DAY, owner: { id: m.id, home },
         };
         if (owner) {
-          if (owner.decisions.some((x) => x.key === decision.key)) return;
+          if (owner.decisions.some((x) => x.owner && x.id === decision.id && x.key === decision.key)) return;
+          // The second mate's own record is authoritative; the parent's relayed status copy of that key gives way to it.
+          owner.decisions = owner.decisions.filter((x) => x.owner || x.kind === 'captain-hold' || x.key !== decision.key);
           owner.decisions.push(decision);
           owner.ageSeconds = oldest(owner.decisions);
           owner.column = decisionColumn(owner.ageSeconds);
@@ -196,7 +199,7 @@
           return;
         }
         const { ageSeconds } = decision;
-        const c = card({ key: `secondmate:${m.id}:${decision.key}`, source: 'secondmate', id: d.id ?? m.id, title: decision.summary, project: m.id, ageSeconds,
+        const c = card({ key: `secondmate:${m.id}:${decision.id ?? ''}:${decision.key}`, source: 'secondmate', id: d.id ?? m.id, title: decision.summary, project: m.id, ageSeconds,
           decisions: [decision], text: [d.reason].filter(Boolean), column: decisionColumn(ageSeconds), badges: ['Second mate'] });
         c.resolve = resolveSteps(c, null);
         out.push(c);

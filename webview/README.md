@@ -17,6 +17,7 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - A task with an open `needs-decision` record, a live captain hold (`hold_bucket == "live"`), or a second mate's `decisions_open` entry is a decision; it goes to Needs your decision when its age is under 3 days and to Aging decisions, oldest first, after that.
 - Each decision ages on its own: a hold from `hold_set` (`hold_age_days` when `hold_set` is missing, including a second mate's holds), and an open status decision, which has no timestamp of its own, from the task's last status event.
   A card's age is its oldest decision, so a 4-day-old hold stays aging even after a fresh worker update; the drawer shows the last update separately.
+- A second mate's own decisions are identified by child task id plus key, so two children that both ask for `approval` stay separate, and they replace the parent's relayed status copy of the same key, because the second mate's own record is authoritative.
 - A second mate's own decisions keep their owning home: the drawer's command for a second mate's hold is prefixed with that home's `FM_HOME`, and no command is shown when the home is remote or unknown, so a copied command never acts on this home's backlog.
 - The drawer looks cards up in a registry of every card any page can show, so finished work older than the board's recent window and queued rows that only appear in lists still open.
 - Blocked holds tasks with an open `blocked` record, a `blocked` or `failed` current state, or unresolved backlog blockers, plus queued rows waiting on unfinished work; blocked records are never shown as decisions.
@@ -84,6 +85,7 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
   No child of a stray is itself a stray, because a stray must have parent pid 1.
   It also refuses a pid whose command differs or whose process is younger than the page showed, which catches pid reuse.
 - The stop is `process.kill(pid, 'SIGTERM')`, a wait of up to 3 seconds, then `SIGKILL` if it is still alive, with no shell and no exec.
+  Before `SIGKILL` the process table is read again: if the pid is gone, or now belongs to a different owner, command, or a younger process (a reused pid), the reply is `already-gone` and nothing more is sent; if it is the same process but no longer a stray, it is refused without the force stop.
   The reply names the outcome: `terminated`, `killed`, `already-gone`, `refused` with a reason, or `failed`, and the server logs every attempt to stderr.
   A pid can still change between the last check and the signal; the window is a few milliseconds and the identity check above narrows it.
 - The snapshot script is run with `spawn` and an argument array, never a shell.
