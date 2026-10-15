@@ -8,7 +8,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | What you want to configure | Start here |
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
-| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
+| Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend), [harness support](#harness-support), and [worker copy seeding](#worker-copy-seeding-configworktree-include) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
@@ -1145,6 +1145,23 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Worker copy seeding (config/worktree-include/)
+
+The optional local, gitignored `config/worktree-include/<project>` file names the gitignored files, such as `.env.local`, that each new worker copy of that project needs.
+`<project>` is the project's clone directory name, and the file uses the same `.gitignore` syntax as a committed `.worktreeinclude`:
+
+```text
+.env.local
+.env.*.local
+```
+
+When the file exists, `bin/fm-spawn.sh` acquires the worker copy with `treehouse get --include-file <that file>`, which replaces the project's committed `.worktreeinclude` for that acquisition; without it, the spawn is unchanged, and treehouse 3.0.0 or newer still honors a committed `.worktreeinclude` by itself.
+Treehouse copies each selected file that git ignores from the root of the clone it runs in, `projects/<project>/`, into the worker copy on every acquisition, and removes the previous seed when a slot is reused.
+That clone is read-only to Firstmate under `AGENTS.md` hard rule 1, so the captain places the source files there, or concretely approves Firstmate placing them.
+`--include-file` needs treehouse 3.0.0 or newer, so while a manifest exists a spawn with an older or unreadable treehouse refuses and names the manifest and the required version, rather than launching a worker without its files.
+The manifest is read from the spawning home and is not inherited by secondmate homes; an orca backend, which owns its own worktrees, ignores it.
+To verify seeding, spawn a worker on the project and confirm that each listed file is present in its worker copy.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
