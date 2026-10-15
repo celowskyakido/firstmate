@@ -41,7 +41,8 @@ const until = async (check, ms = 5000) => {
 
 test('first load reports loading, then a timeout with its real reason, without waiting for grandchildren', async (t) => {
   setMode('hang');
-  const app = await start({ home, port: 0, pollMs: 60_000, snapshotTimeoutMs: 300, snapshotScript: script, collectResources: async () => ({}) });
+  // Long enough that the first request lands before the timeout even on a loaded CI runner.
+  const app = await start({ home, port: 0, pollMs: 60_000, snapshotTimeoutMs: 1500, snapshotScript: script, collectResources: async () => ({}) });
   t.after(() => app.close());
   const loading = await get(app.port);
   assert.equal(loading.status, 503);
@@ -51,7 +52,7 @@ test('first load reports loading, then a timeout with its real reason, without w
   assert.ok(Date.now() - began < 5000, 'the hung grandchild was killed with the process group');
   const failed = await get(app.port);
   assert.equal(failed.status, 503);
-  assert.match(failed.body.error, /fm-fleet-snapshot\.sh failed: timed out after 300 ms/);
+  assert.match(failed.body.error, /fm-fleet-snapshot\.sh failed: timed out after 1500 ms/);
 });
 
 test('a failed refresh keeps serving the last good snapshot with the exit code and stderr', async (t) => {
