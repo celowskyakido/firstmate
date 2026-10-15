@@ -239,6 +239,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
 - [`AGENTS.md`](AGENTS.md) - the supervisor contract, role boundary, and routing index for conditional procedures.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
+- [webview/README.md](webview/README.md) - fork-only: a read-only, localhost-only web view over the fleet snapshot.
 
 ## Contributing
 

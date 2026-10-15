@@ -1,0 +1,7 @@
+{
+  "name": "firstmate-webview",
+  "private": true,
+  "description": "Read-only localhost web view over fm-fleet-snapshot.sh",
+  "scripts": { "start": "node server.js", "test": "node --test tests/*.test.js" },
+  "engines": { "node": ">=20" }
+}
