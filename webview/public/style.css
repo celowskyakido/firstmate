@@ -3,7 +3,11 @@ body { margin: 0 auto; max-width: 70rem; padding: 0 1rem 3rem; }
 header { display: flex; gap: 1.5rem; align-items: baseline; flex-wrap: wrap; }
 nav a { margin-right: 1rem; }
 #freshness { margin-left: auto; opacity: .7; font-size: .85rem; }
-#banner { background: #b00020; color: #fff; padding: .5rem 1rem; border-radius: 4px; }
+.banner-error, .banner-info { padding: .5rem 1rem; border-radius: 4px; }
+.banner-error { background: #b00020; color: #fff; }
+.banner-info { background: #8882; }
+.asks { padding-left: 1.2rem; }
+.asks li { margin: .4rem 0; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8884; vertical-align: top; }
 .state { font-weight: 600; }

@@ -32,6 +32,7 @@ function makeHome() {
     '- [ ] demo-held - Pick a name (repo: demo) (kind: captain) (hold: choose naming) (hold-kind: captain)',
     '',
     '## Done',
+    '- [x] demo-old - Shipped demo widget https://example.invalid/demo/pull/3 (repo: demo) (kind: ship) (done 2026-07-08)',
     '',
   ].join('\n'));
   return home;

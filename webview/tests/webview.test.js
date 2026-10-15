@@ -87,6 +87,39 @@ test('overview and detail view-models carry state, PR, and waiting-on', () => {
   assert.equal(R.taskDetail(real, 'missing'), null);
 });
 
+test('board: needs-the-captain, in flight by project, recently finished', () => {
+  const { needsCaptain, inFlight, finished } = R.board(real);
+  assert.deepEqual(needsCaptain.map((a) => [a.label, a.taskId, a.title]), [
+    ['Needs a decision', 'demo-task-1', `choose ${XSS}`],
+    ['Your call', null, 'Pick a name'],
+  ]);
+  assert.deepEqual(inFlight.map((g) => [g.project, g.tasks.map((t) => t.id)]), [['demo', ['demo-task-1']]]);
+  assert.deepEqual(finished.map((f) => [f.id, f.verb, f.date, f.url]), [['demo-old', 'done', '2026-07-08', 'https://example.invalid/demo/pull/3']]);
+});
+
+test('board: a done task with an open PR is review-ready; a merged one is not', () => {
+  const withTask = (detail) => ({
+    ...real,
+    tasks: [{ ...real.tasks[0], hints: {}, current_state: { state: 'done', detail } }],
+    backlog: { records: [] },
+  });
+  const [ready] = R.board(withTask('run passed: PR open')).needsCaptain;
+  assert.deepEqual([ready.label, ready.prUrl], ['PR ready for review', 'https://example.invalid/demo/pull/9']);
+  assert.equal(R.board(withTask('run passed: PR merged')).needsCaptain.length, 0);
+});
+
+test('freshness banner never replaces data with an error', () => {
+  const now = Date.parse('2026-07-08T12:00:00Z');
+  assert.deepEqual(R.freshnessBanner({ loading: true, error: null }),
+    { tone: 'info', text: 'Loading the first snapshot (can take up to a minute).' });
+  assert.equal(R.freshnessBanner({ loading: true, error: 'timed out after 5 ms' }).tone, 'error');
+  assert.deepEqual(R.freshnessBanner({ fetchedAt: '2026-07-08T11:58:00Z', refreshing: true, now }),
+    { tone: 'info', text: 'Data from 2 min ago · refreshing' });
+  assert.deepEqual(R.freshnessBanner({ fetchedAt: '2026-07-08T11:59:30Z', stale: 'exit code 3', now }),
+    { tone: 'error', text: 'Data from 30s ago. Last refresh failed: exit code 3.' });
+  assert.equal(R.freshnessBanner({ fetchedAt: '2026-07-08T11:59:30Z', now }).tone, 'quiet');
+});
+
 test('client refuses a foreign snapshot schema', () => {
   assert.throws(() => R.fleetOverview({ schema: 'fm-fleet-snapshot.v2' }), /Unsupported snapshot schema/);
   assert.throws(() => R.decisionsInbox({}), /Unsupported snapshot schema/);

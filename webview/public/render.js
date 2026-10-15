@@ -97,5 +97,56 @@
     };
   };
 
-  return { SCHEMA, assertSchema, fleetOverview, decisionsInbox, taskDetail };
+  const ASK_LABEL = { 'needs-decision': 'Needs a decision', blocked: 'Blocked', 'captain-hold': 'Your call', decision: 'Needs a decision' };
+  // fm-crew-state.sh's fixed detail vocabulary for a passed run whose PR no longer awaits a merge call.
+  const PR_SETTLED = /\bPR (merged|closed)\b/;
+  const RECENT_LIMIT = 15;
+  const NO_PROJECT = '(no project)';
+
+  // One status board: what needs the captain, work in flight by project, and
+  // recently finished rows. Every bucket is a snapshot field, never a status-log fold.
+  const board = (snapshot) => {
+    const { tasks } = fleetOverview(snapshot);
+    const asks = decisionsInbox(snapshot).items.map((d) => ({
+      label: ASK_LABEL[d.kind] ?? d.kind, taskId: d.taskId, project: d.project ?? null, title: d.summary,
+      detail: [d.reason, d.holdUntil && `until ${d.holdUntil}`, d.ageDays != null && `${d.ageDays}d old`].filter(Boolean).join(' · '),
+      prUrl: null, source: d.source,
+    }));
+    const reviews = tasks.filter((t) => t.state === 'done' && t.prUrl && !PR_SETTLED.test(t.stateDetail ?? '')).map((t) => ({
+      label: 'PR ready for review', taskId: t.id, project: t.project, title: t.title ?? t.id, detail: t.stateDetail ?? '', prUrl: t.prUrl, source: 'task',
+    }));
+    const byProject = new Map();
+    tasks.forEach((t) => byProject.set(t.project ?? NO_PROJECT, [...(byProject.get(t.project ?? NO_PROJECT) ?? []), t]));
+    const finished = [
+      ...(snapshot.backlog?.records ?? []).filter((r) => r.state === 'done'),
+      ...(snapshot.secondmate_landed?.records ?? []),
+    ].map((r) => ({
+      id: r.id, title: r.title ?? r.raw ?? r.id, project: r.repo ?? null, home: r.home_id ?? null,
+      verb: r.completion?.verb ?? null, date: r.completion?.date ?? r.done ?? null, url: r.pr_url ?? r.report_path ?? null,
+    })).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? '')).slice(0, RECENT_LIMIT);
+    return {
+      needsCaptain: [...asks, ...reviews],
+      inFlight: [...byProject].sort(([a], [b]) => a.localeCompare(b)).map(([project, list]) => ({ project, tasks: list })),
+      finished,
+    };
+  };
+
+  const ago = (ms) => {
+    const s = Math.max(0, Math.round(ms / 1000));
+    return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+  };
+
+  // Plain-language freshness line; tone 'error' only when the newest refresh failed.
+  const freshnessBanner = ({ loading, fetchedAt, stale, refreshing, error, now = Date.now() }) => {
+    if (loading) {
+      return error
+        ? { tone: 'error', text: `The first snapshot failed: ${error}. Retrying.` }
+        : { tone: 'info', text: 'Loading the first snapshot (can take up to a minute).' };
+    }
+    const age = fetchedAt ? `Data from ${ago(now - Date.parse(fetchedAt))}` : 'Data age unknown';
+    if (stale) return { tone: 'error', text: `${age}. Last refresh failed: ${stale}.${refreshing ? ' Retrying now.' : ''}` };
+    return { tone: refreshing ? 'info' : 'quiet', text: `${age}${refreshing ? ' · refreshing' : ''}` };
+  };
+
+  return { SCHEMA, assertSchema, fleetOverview, decisionsInbox, taskDetail, board, freshnessBanner };
 });

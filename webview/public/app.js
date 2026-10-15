@@ -21,42 +21,43 @@
     el('thead', {}, el('tr', {}, headers.map((h) => text('th', h)))),
     el('tbody', {}, rows));
   const cell = (...children) => el('td', {}, ...children);
-  const taskLink = (id) => el('a', { href: `#/task/${encodeURIComponent(id)}`, textContent: id });
+  const taskLink = (id, label) => el('a', { href: `#/task/${encodeURIComponent(id)}`, textContent: label || id });
 
-  const renderOverview = () => {
-    const { tasks, secondmates } = R.fleetOverview(snapshot);
-    return [
-      text('h2', `Workers and tasks (${tasks.length})`),
-      tasks.length ? table(['Task', 'Kind', 'Project', 'State', 'Waiting on', 'PR', 'Endpoint'], tasks.map((t) => el('tr', { className: t.needsCaptain ? 'needs-captain' : '' },
-        cell(taskLink(t.id), t.title ? el('div', { className: 'muted', textContent: t.title }) : ''),
-        cell(t.kind ?? ''), cell(t.project ?? ''),
-        cell(text('span', t.state, { className: `state state-${t.state}` }), t.stateDetail ? el('div', { className: 'muted', textContent: t.stateDetail }) : ''),
-        cell(t.waitsOn.map((w) => text('div', w))),
-        cell(safeLink(t.prUrl)),
-        cell(`${t.endpointExists === null ? '?' : t.endpointExists ? 'present' : 'missing'}${t.agentAlive && t.agentAlive !== 'not_checked' ? ` / ${t.agentAlive}` : ''}`)))) : text('p', 'No live task metadata.', { className: 'muted' }),
-      text('h2', `Secondmates (${secondmates.length})`),
-      secondmates.length ? table(['Secondmate', 'State', 'Active', 'Decisions', 'Holds', 'Queued'], secondmates.map((m) => el('tr', {},
-        cell(m.id), cell(m.state), cell(m.activeChildren), cell(m.decisionsOpen), cell(m.holds), cell(m.queued)))) : text('p', 'None registered.', { className: 'muted' }),
-    ];
-  };
+  const stateCell = (t) => cell(text('span', t.state, { className: `state state-${t.state}` }), t.stateDetail ? el('div', { className: 'muted', textContent: t.stateDetail }) : '');
+  const empty = (message) => text('p', message, { className: 'muted' });
 
-  const renderDecisions = () => {
-    const { items } = R.decisionsInbox(snapshot);
+  const renderBoard = () => {
+    const { needsCaptain, inFlight, finished } = R.board(snapshot);
+    const taskCount = inFlight.reduce((n, g) => n + g.tasks.length, 0);
     return [
-      text('h2', `Decisions inbox (${items.length})`),
-      items.length ? table(['Task', 'Kind', 'Summary', 'Detail', 'Source'], items.map((d) => el('tr', {},
-        cell(d.taskId ? taskLink(d.taskId) : d.id), cell(d.kind ?? ''), cell(d.summary ?? ''),
-        cell([d.reason, d.holdUntil && `until ${d.holdUntil}`, d.ageDays != null && `${d.ageDays}d old`].filter(Boolean).join(' · ')),
-        cell(d.source)))) : text('p', 'Nothing waiting on the captain.', { className: 'muted' }),
+      text('h2', `Needs the captain (${needsCaptain.length})`),
+      needsCaptain.length ? el('ul', { className: 'asks' }, needsCaptain.map((a) => el('li', {},
+        text('strong', a.label), ' ',
+        a.taskId ? taskLink(a.taskId, a.title) : text('span', a.title),
+        a.project ? text('span', ` · ${a.project}`, { className: 'muted' }) : '',
+        a.prUrl ? el('div', {}, safeLink(a.prUrl)) : '',
+        a.detail ? text('div', a.detail, { className: 'muted' }) : ''))) : empty('Nothing waiting on the captain.'),
+      text('h2', `In flight (${taskCount})`),
+      ...(inFlight.length ? inFlight.flatMap(({ project, tasks }) => [
+        text('h3', `${project} (${tasks.length})`),
+        table(['Task', 'State', 'Waiting on', 'PR'], tasks.map((t) => el('tr', { className: t.needsCaptain ? 'needs-captain' : '' },
+          cell(taskLink(t.id, t.title), t.title ? text('div', t.id, { className: 'muted' }) : '', t.kind ? text('div', t.kind, { className: 'muted' }) : ''),
+          stateCell(t), cell(t.waitsOn.map((w) => text('div', w))), cell(safeLink(t.prUrl))))),
+      ]) : [empty('No work in flight.')]),
+      text('h2', `Recently finished (${finished.length})`),
+      finished.length ? table(['Finished', 'Task', 'Project', 'Link'], finished.map((f) => el('tr', {},
+        cell([f.verb, f.date].filter(Boolean).join(' ')),
+        cell(text('div', f.title), text('div', f.home ? `${f.id} · via ${f.home}` : f.id, { className: 'muted' })),
+        cell(f.project ?? ''), cell(safeLink(f.url))))) : empty('Nothing finished recently.'),
     ];
   };
 
   const renderTask = (id) => {
     const t = R.taskDetail(snapshot, id, taskDetail?.id === id ? taskDetail : null);
-    if (!t) return [text('h2', `Unknown task ${id}`), el('a', { href: '#/', textContent: 'Back to fleet' })];
+    if (!t) return [text('h2', `Unknown task ${id}`), el('a', { href: '#/', textContent: 'Back to the board' })];
     const row = (k, v) => el('tr', {}, text('th', k), cell(v ?? ''));
     return [
-      el('p', {}, el('a', { href: '#/', textContent: '← Fleet' })),
+      el('p', {}, el('a', { href: '#/', textContent: '← Board' })),
       text('h2', t.id),
       el('table', {},
         row('Title', t.title), row('Kind', t.kind), row('Project', t.project), row('Harness', t.harness),
@@ -73,42 +74,53 @@
 
   const route = () => {
     const [, page, arg] = location.hash.slice(1).split('/');
-    return page === 'decisions' ? { page } : page === 'task' && arg ? { page, id: decodeURIComponent(arg) } : { page: 'overview' };
+    return page === 'task' && arg ? { page, id: decodeURIComponent(arg) } : { page: 'board' };
   };
 
   const render = () => {
-    document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('muted', a.dataset.route !== route().page));
     if (!snapshot) return;
     const r = route();
     try {
-      view.replaceChildren(...(r.page === 'decisions' ? renderDecisions() : r.page === 'task' ? renderTask(r.id) : renderOverview()));
-      document.getElementById('decision-count').textContent = `(${R.decisionsInbox(snapshot).items.length})`;
+      view.replaceChildren(...(r.page === 'task' ? renderTask(r.id) : renderBoard()));
+      document.title = `Firstmate (${R.board(snapshot).needsCaptain.length} need you)`;
     } catch (e) {
-      showError(e.message);
+      showBanner({ tone: 'error', text: e.message });
     }
   };
 
-  const showError = (message) => { banner.hidden = false; banner.textContent = message; };
+  const showBanner = ({ tone, text: message }) => {
+    banner.hidden = tone === 'quiet';
+    banner.className = `banner-${tone}`;
+    banner.textContent = message;
+    freshness.textContent = tone === 'quiet' ? message : '';
+  };
 
   const getJson = async (url) => {
     const res = await fetch(url, { cache: 'no-store' });
     const body = await res.json();
-    if (!res.ok) throw new Error(body.error ?? `${url}: HTTP ${res.status}`);
+    if (!res.ok && !body.loading) throw new Error(body.error ?? `${url}: HTTP ${res.status}`);
     return [body, res];
   };
 
+  // The page keeps whatever it last rendered; only a newer snapshot version replaces it.
+  let version = null;
   const refresh = async () => {
     try {
       const [body, res] = await getJson('/api/snapshot');
-      snapshot = R.assertSchema(body);
+      if (body.loading) return showBanner(R.freshnessBanner(body));
       const stale = res.headers.get('X-Snapshot-Stale');
-      stale ? showError(`Showing stale data: ${decodeURIComponent(stale)}`) : (banner.hidden = true);
-      freshness.textContent = `snapshot ${snapshot.generated} · fetched ${res.headers.get('X-Snapshot-Fetched-At')}`;
+      showBanner(R.freshnessBanner({
+        fetchedAt: res.headers.get('X-Snapshot-Fetched-At'),
+        stale: stale && decodeURIComponent(stale),
+        refreshing: res.headers.has('X-Snapshot-Refreshing'),
+      }));
       const r = route();
+      const isNew = res.headers.get('X-Snapshot-Version') !== version;
+      if (isNew) { snapshot = R.assertSchema(body); version = res.headers.get('X-Snapshot-Version'); }
       if (r.page === 'task') taskDetail = (await getJson(`/api/task/${encodeURIComponent(r.id)}`).catch(() => [null]))[0];
-      render();
+      if (isNew || r.page === 'task') render();
     } catch (e) {
-      showError(e.message);
+      showBanner({ tone: 'error', text: snapshot ? `Lost contact with the web view server: ${e.message}` : e.message });
     }
   };
 

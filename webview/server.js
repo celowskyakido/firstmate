@@ -6,7 +6,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
 const HOST = '127.0.0.1';
@@ -32,17 +32,43 @@ const parseSnapshot = (stdout) => {
   return snapshot;
 };
 
-const fetchSnapshot = (home) => new Promise((resolve, reject) => {
+const describeFailure = (error, stderr, timedOutMs) => {
+  const why = timedOutMs ? `timed out after ${timedOutMs} ms`
+    : error.signal ? `killed by ${error.signal}` : error.code != null ? `exit code ${error.code}` : error.message;
+  const tail = stderr.trim().slice(-2000);
+  return `fm-fleet-snapshot.sh failed: ${why}${tail ? `: ${tail}` : ''}`;
+};
+
+// The script fans out to jq and per-task reads; killing only the shell would
+// leave those holding stdout open, so it runs as its own process group.
+const killGroup = (child) => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } };
+
+const MAX_OUTPUT = 64 * 1024 * 1024;
+
+// Resolves with the snapshot; `child` lets close() stop a run still in flight.
+// spawn, not execFile: execFile silently drops `detached`.
+const fetchSnapshot = (script, home, timeoutMs) => {
   // Argument array, no shell: nothing from the fleet ever reaches a command line.
-  execFile(SNAPSHOT_SCRIPT, ['--json'], {
-    env: { ...process.env, FM_HOME: home },
-    timeout: 30_000,
-    maxBuffer: 64 * 1024 * 1024,
-  }, (error, stdout, stderr) => {
-    if (error) return reject(new Error(`fm-fleet-snapshot.sh failed: ${stderr.trim() || error.message}`));
-    try { resolve(parseSnapshot(stdout)); } catch (e) { reject(e); }
+  const child = spawn(script, ['--json'], { env: { ...process.env, FM_HOME: home }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const done = new Promise((resolve, reject) => {
+    let timedOutMs = 0;
+    const out = { stdout: '', stderr: '' };
+    const timer = setTimeout(() => { timedOutMs = timeoutMs; killGroup(child); }, timeoutMs);
+    for (const name of ['stdout', 'stderr']) {
+      child[name].setEncoding('utf8').on('data', (chunk) => {
+        out[name] += chunk;
+        if (out[name].length > MAX_OUTPUT) killGroup(child);
+      });
+    }
+    child.on('error', (error) => { clearTimeout(timer); reject(new Error(describeFailure(error, out.stderr, 0))); });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(describeFailure({ code, signal }, out.stderr, timedOutMs)));
+      try { resolve(parseSnapshot(out.stdout)); } catch (e) { reject(e); }
+    });
   });
-});
+  return { child, done };
+};
 
 const readTail = async (file) => {
   let text;
@@ -63,25 +89,39 @@ const readInbox = async (dir) => {
   return { pending: await list(dir), handled: await list(path.join(dir, 'handled')) };
 };
 
-async function start({ home, port = 4780, pollMs = 7000 }) {
+async function start({ home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
-  const state = { snapshot: null, version: 0, fetchedAt: null, error: null };
+  const state = { snapshot: null, version: 0, fetchedAt: null, error: null, refreshing: false, failures: 0 };
+  let timer = null;
+  let running = null;
+  let closed = false;
 
+  // The next poll is scheduled only after the current one settles, so refreshes
+  // never overlap; on a big home one run can take most of a minute.
   const poll = async () => {
+    state.refreshing = true;
     try {
-      state.snapshot = await fetchSnapshot(home);
+      running = fetchSnapshot(snapshotScript, home, snapshotTimeoutMs);
+      state.snapshot = await running.done;
       state.version += 1;
       state.fetchedAt = new Date().toISOString();
       state.error = null;
+      state.failures = 0;
     } catch (e) {
       state.error = e.message;
-      console.error(`webview: ${e.message}`);
+      state.failures += 1;
+      if (!closed) console.error(`webview: ${e.message}`);
+    } finally {
+      state.refreshing = false;
+      running = null;
     }
+    if (closed) return;
+    // Back off after consecutive failures, capped at 64x the poll interval.
+    timer = setTimeout(poll, pollMs * 2 ** Math.min(state.failures, 6));
+    timer.unref();
   };
   const firstPoll = poll();
-  const timer = setInterval(poll, pollMs);
-  timer.unref();
 
   const send = (res, status, type, body, extra = {}) => {
     res.writeHead(status, {
@@ -111,10 +151,11 @@ async function start({ home, port = 4780, pollMs = 7000 }) {
         return send(res, 200, type, await fs.promises.readFile(path.join(PUBLIC_DIR, file)));
       }
       if (pathname === '/api/snapshot') {
-        if (!state.snapshot) return sendJson(res, 503, { error: state.error ?? 'snapshot not ready yet' });
+        if (!state.snapshot) return sendJson(res, 503, { loading: true, refreshing: state.refreshing, error: state.error });
         const meta = { 'X-Snapshot-Version': String(state.version), 'X-Snapshot-Fetched-At': state.fetchedAt };
         // A failed refresh keeps serving the last good snapshot, flagged as stale.
         if (state.error) meta['X-Snapshot-Stale'] = encodeURIComponent(state.error);
+        if (state.refreshing) meta['X-Snapshot-Refreshing'] = '1';
         return sendJson(res, 200, state.snapshot, meta);
       }
       const match = pathname.match(/^\/api\/task\/([^/]+)$/);
@@ -143,7 +184,12 @@ async function start({ home, port = 4780, pollMs = 7000 }) {
       server,
       port: server.address().port,
       ready: firstPoll,
-      close: () => { clearInterval(timer); return new Promise((r) => server.close(r)); },
+      close: () => {
+        closed = true;
+        clearTimeout(timer);
+        if (running) killGroup(running.child);
+        return new Promise((r) => server.close(r));
+      },
     }));
   });
 }
@@ -160,6 +206,7 @@ if (require.main === module) {
     home,
     port: Number(process.env.WEBVIEW_PORT ?? 4780),
     pollMs: Number(process.env.WEBVIEW_POLL_MS ?? 7000),
+    snapshotTimeoutMs: Number(process.env.WEBVIEW_SNAPSHOT_TIMEOUT_MS ?? 180_000),
   }).then(({ port }) => console.log(`webview: http://${HOST}:${port}/ (read-only)`))
     .catch((e) => { console.error(`webview: ${e.message}`); process.exit(2); });
 }
