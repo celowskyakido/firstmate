@@ -15,7 +15,10 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 `cards()` in `public/render.js` classifies from structured snapshot fields only, never by matching free text (the one exception is `bin/fm-crew-state.sh`'s fixed `PR merged` / `PR closed` detail vocabulary):
 
 - A task with an open `needs-decision` record, a live captain hold (`hold_bucket == "live"`), or a second mate's `decisions_open` entry is a decision; it goes to Needs your decision when its age is under 3 days and to Aging decisions, oldest first, after that.
-- Decision age is the time since the task's last status event, or since `hold_set` for a hold (`hold_age_days` when `hold_set` is missing).
+- Each decision ages on its own: a hold from `hold_set` (`hold_age_days` when `hold_set` is missing, including a second mate's holds), and an open status decision, which has no timestamp of its own, from the task's last status event.
+  A card's age is its oldest decision, so a 4-day-old hold stays aging even after a fresh worker update; the drawer shows the last update separately.
+- A second mate's own decisions keep their owning home: the drawer's command for a second mate's hold is prefixed with that home's `FM_HOME`, and no command is shown when the home is remote or unknown, so a copied command never acts on this home's backlog.
+- The drawer looks cards up in a registry of every card any page can show, so finished work older than the board's recent window and queued rows that only appear in lists still open.
 - Blocked holds tasks with an open `blocked` record, a `blocked` or `failed` current state, or unresolved backlog blockers, plus queued rows waiting on unfinished work; blocked records are never shown as decisions.
 - A `done` task with an open PR goes to Ready to land when it ran the no-mistakes pipeline (its review is done and it awaits the merge call) and to Waiting on review when it is a direct PR; a merged or closed PR goes to Done.
 - A paused task or one with no live status that has a PR goes to Waiting on review; a `done` local-only task goes to Ready to land; a finished investigation goes to Waiting on review.

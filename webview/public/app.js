@@ -11,6 +11,8 @@
   const detailBody = document.getElementById('detail-body');
   let snapshot = null;
   let allCards = [];
+  // Every card any page can link to, so the drawer opens list-only and older finished cards too.
+  let registry = new Map();
   let resources = null;
   let resourcesLine = '';
   let history = { fleet: [], machine: [] };
@@ -74,7 +76,8 @@
     snippet(c) && snippet(c) !== c.title ? text('p', snippet(c), { className: 'card-snippet' }) : '',
     el('div', { className: 'card-meta' },
       text('span', R.projectName(c.project), { className: 'chip' }),
-      c.ageSeconds != null ? text('span', R.duration(c.ageSeconds), { className: `age${c.column === 'aging' ? ' age-old' : ''}`, title: `Last update ${ago(c.ageSeconds)}` }) : '',
+      c.ageSeconds != null ? text('span', R.duration(c.ageSeconds), { className: `age${c.column === 'aging' ? ' age-old' : ''}`,
+        title: c.decisions.length ? `Waiting on you for ${R.duration(c.ageSeconds)}` : `Last update ${ago(c.ageSeconds)}` }) : '',
       c.date ? text('span', c.date, { className: 'age' }) : '',
       c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, R.prNumber(c.prUrl) ? `PR ${R.prNumber(c.prUrl)}` : 'PR', 'pr-badge') : '',
       c.badges.map((b) => text('span', b, { className: 'badge' }))));
@@ -332,13 +335,13 @@
       note);
   };
   const blockerLink = (id) => {
-    const target = allCards.find((c) => c.id === id && c.column !== 'done');
+    const target = [...registry.values()].find((c) => c.id === id && c.column !== 'done');
     return target ? el('a', { href: cardHref(target), textContent: id }) : text('span', id);
   };
   const closeButton = () => el('button', { type: 'button', className: 'close', textContent: 'Close', key: 'close', onclick: () => dialog.close() });
 
   const renderDetail = (key, detail) => {
-    const c = allCards.find((x) => x.key === key);
+    const c = registry.get(key);
     if (!c) return [el('div', { className: 'detail-head' }, text('h2', 'This item is no longer on the board', { id: 'detail-title' }), closeButton())];
     const column = R.COLUMNS.find((x) => x.key === c.column);
     const t = c.taskId ? R.taskDetail(snapshot, c.taskId, detail) : null;
@@ -362,7 +365,8 @@
         c.resolve.map(copyRow)) : '',
       el('dl', {},
         c.stateDetail ? row('Latest status', c.stateDetail) : '',
-        c.ageSeconds != null ? row('Last update', ago(c.ageSeconds)) : '',
+        c.decisions.length && c.ageSeconds != null ? row('Waiting on you', `for ${R.duration(c.ageSeconds)}`) : '',
+        (c.lastUpdateSeconds ?? (c.decisions.length ? null : c.ageSeconds)) != null ? row('Last update', ago(c.lastUpdateSeconds ?? c.ageSeconds)) : '',
         c.since ? row('Started', c.since) : '',
         c.date ? row('Finished', c.date) : '',
         row('Pull request', c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, c.prUrl, 'url') : 'None')),
@@ -429,7 +433,7 @@
     if (detailFor?.key !== r.key) detailFor = { key: r.key, detail: null };
     fillDetail(r.key, detailFor.detail);
     if (!dialog.open) { dialog.showModal(); detailBody.querySelector('.close')?.focus(); }
-    const taskId = allCards.find((c) => c.key === r.key)?.taskId;
+    const taskId = registry.get(r.key)?.taskId;
     if (!taskId) return;
     const [detail] = await getJson(`/api/task/${encodeURIComponent(taskId)}`).catch(() => [null]);
     if (detail && detailFor?.key === r.key && route().key === r.key) {
@@ -475,6 +479,7 @@
       if (res.headers.get('X-Snapshot-Version') !== version) {
         snapshot = R.assertSchema(body);
         allCards = R.cards(snapshot);
+        registry = R.cardRegistry(snapshot);
         version = res.headers.get('X-Snapshot-Version');
         renderBase();
         if (route().page === 'card') syncDetail();

@@ -85,18 +85,55 @@ test('a live hold on a running task makes the task card a decision instead of a 
   assert.deepEqual(all.map((c) => [c.key, c.column, c.decisions.map((d) => d.summary)]), [['task:demo-a', 'decide', ['approve the plan']]]);
 });
 
-test('second mate decisions join the second mate card once, or stand alone', () => {
+test('second mate decisions join the second mate card once, or stand alone, and age by their own hold', () => {
   const mate = task('demo-mate', 'parked', { kind: 'secondmate', decision: 'from status', age: HOUR });
   const all = R.cards(snap([mate], [], { secondmate_current: { records: [
-    { id: 'demo-mate', decisions_open: [{ id: 'demo-q', key: 'demo-mate-q', verb: 'needs-decision', summary: 'duplicate of the status one' },
+    { id: 'demo-mate', home: "/tmp/demo homes/mate's", remote: false, decisions_open: [
+      { id: 'demo-q', key: 'demo-mate-q', verb: 'needs-decision', summary: 'duplicate of the status one' },
       { id: 'demo-hold', key: 'demo-hold', verb: 'captain-hold', summary: 'its own hold', hold_age_days: 5 }] },
-    { id: 'demo-remote', decisions_open: [{ id: 'demo-r', key: 'demo-r', verb: 'captain-hold', summary: 'remote ask', hold_age_days: 1 }] },
+    { id: 'demo-remote', home: '/srv/demo/remote', remote: { host: 'demo-host' }, decisions_open: [{ id: 'demo-r', key: 'demo-r', verb: 'captain-hold', summary: 'remote ask', hold_age_days: 1 }] },
   ] } }));
   const own = all.find((c) => c.id === 'demo-mate');
   assert.deepEqual(own.decisions.map((d) => d.summary), ['from status', 'its own hold']);
+  assert.deepEqual([own.column, own.ageSeconds, own.lastUpdateSeconds], ['aging', 5 * DAY, HOUR], 'the 5-day hold ages the card, not the recent update');
   assert.ok(own.badges.includes('Second mate'));
+  assert.deepEqual(own.resolve.map((s) => s.text), [
+    'For demo-mate (from status): <your answer>',
+    "bin/fm-send.sh fm-demo-mate --resolve-key demo-mate-q '<your answer>'",
+    'For second mate demo-mate, decision on demo-hold: <your answer>',
+    `FM_HOME='/tmp/demo homes/mate'\\''s' bin/fm-captain-hold.sh answer demo-hold --decision-file <file with your answer> --release`,
+  ], 'the main-home status decision steers the second mate; its own hold is answered in its own home');
   const remote = all.find((c) => c.source === 'secondmate');
   assert.deepEqual([remote.id, remote.column, remote.ageSeconds], ['demo-r', 'decide', DAY]);
+  assert.deepEqual(remote.resolve.map((s) => s.text), ['For second mate demo-remote, decision on demo-r: <your answer>'],
+    'no command when the owning home is remote, so nothing can run against this home');
+});
+
+test('a live hold ages from when it was set, not from the latest worker update', () => {
+  const t = task('demo-a', 'working', { age: 60 });
+  t.backlog = { ...t.backlog, hold_bucket: 'live', hold_reason: 'approve the plan', hold_set: ago(4 * DAY) };
+  const fallback = task('demo-b', 'working', { age: 60 });
+  fallback.backlog = { ...fallback.backlog, hold_bucket: 'live', hold_reason: 'pick a date', hold_age_days: 2 };
+  const by = Object.fromEntries(R.cards(snap([t, fallback], [t.backlog, fallback.backlog])).map((c) => [c.id, c]));
+  assert.deepEqual([by['demo-a'].column, by['demo-a'].ageSeconds, by['demo-a'].lastUpdateSeconds], ['aging', 4 * DAY, 60]);
+  assert.deepEqual([by['demo-b'].column, by['demo-b'].ageSeconds], ['decide', 2 * DAY]);
+});
+
+test('the card registry resolves every listed card, beyond the board window and off the board', () => {
+  const finished = Array.from({ length: 18 }, (_, i) => ({ id: `demo-done-${i}`, title: `Done ${i}`, repo: 'demo-api', state: 'done',
+    completion: { verb: 'merged', date: i < 17 ? '2026-07-08' : '2026-07-01' } }));
+  const queued = [{ id: 'demo-plain', title: 'Plain queued', repo: 'demo-api', state: 'queued' },
+    { id: 'demo-held', title: 'Held', repo: 'demo-api', state: 'queued', hold_bucket: 'live', hold_reason: 'choose', hold_age_days: 1 }];
+  const s = snap([], [...finished, ...queued]);
+  assert.equal(R.cards(s).filter((c) => c.column === 'done').length, 15, 'the board keeps its recent window');
+  const registry = R.cardRegistry(s);
+  const today = R.listView(s, 'done-today', '2026-07-08').cards;
+  assert.equal(today.length, 17);
+  today.forEach((c) => assert.deepEqual(registry.get(c.key), c, c.key));
+  const queuedList = R.listView(s, 'queued').cards;
+  assert.deepEqual(queuedList.map((c) => c.key).sort(), ['hold:demo-held', 'queued:demo-plain']);
+  queuedList.forEach((c) => assert.deepEqual(registry.get(c.key), c, c.key));
+  assert.ok(registry.has('done::demo-done-17'), 'finished work older than the window still opens');
 });
 
 test('resolve steps for PRs: merge ready work, review direct PRs, watch working tasks', () => {

@@ -75,16 +75,30 @@
   };
 
   const steerTarget = (task) => task.actions?.steer?.split(/\s+/)[1] ?? null;
+  const shellQuote = (value) => `'${value.replace(/'/g, "'\\''")}'`;
+  const holdCommand = (id) => `bin/fm-captain-hold.sh answer ${id} --decision-file <file with your answer> --release`;
+
+  // A decision recorded in a second mate's home is answered in that home, never
+  // this one: its command names that FM_HOME, or is left out when the home is
+  // remote or unknown, so a copied command cannot act on the wrong backlog.
+  const decisionSteps = (c, d, target) => {
+    if (d.owner) {
+      const isHold = d.kind === 'captain-hold';
+      return [{ label: 'Tell firstmate', text: `For second mate ${d.owner.id}, ${isHold ? `decision on ${d.holdId}` : `${d.key} (${d.summary})`}: <your answer>` },
+        isHold && d.owner.home && { label: `Command firstmate would run in second mate ${d.owner.id}'s home`, text: `FM_HOME=${shellQuote(d.owner.home)} ${holdCommand(d.holdId)}` }];
+    }
+    if (d.kind === 'captain-hold') {
+      return [{ label: 'Tell firstmate', text: `Decision on ${d.holdId ?? c.id}: <your call>` }, { label: 'Command firstmate would run', text: holdCommand(d.holdId ?? c.id) }];
+    }
+    return [{ label: 'Tell firstmate', text: `For ${c.id} (${d.summary}): <your answer>` },
+      target && { label: 'Command firstmate would run', text: `bin/fm-send.sh ${target} --resolve-key ${d.key} '<your answer>'` }];
+  };
 
   // Suggested ways to resolve a card: what to tell firstmate, and the command it
   // would run. The web view never runs them.
   const resolveSteps = (c, task) => {
     const target = task && steerTarget(task);
-    const steps = c.decisions.flatMap((d) => (d.kind === 'captain-hold'
-      ? [{ label: 'Tell firstmate', text: `Decision on ${d.holdId ?? c.id}: <your call>` },
-        { label: 'Command firstmate would run', text: `bin/fm-captain-hold.sh answer ${d.holdId ?? c.id} --decision-file <file with your answer> --release` }]
-      : [{ label: 'Tell firstmate', text: `For ${c.id} (${d.summary}): <your answer>` },
-        target && { label: 'Command firstmate would run', text: `bin/fm-send.sh ${target} --resolve-key ${d.key} '<your answer>'` }]));
+    const steps = c.decisions.flatMap((d) => decisionSteps(c, d, target));
     if (steps.length) return steps.filter(Boolean);
     const blockedEvent = c.blockers.events[0];
     if (blockedEvent) {
@@ -104,8 +118,10 @@
     return [];
   };
 
+  // ageSeconds is how long the card has waited: for a decision, since the oldest
+  // decision was raised; otherwise since the last update (lastUpdateSeconds).
   const card = (fields) => ({
-    taskId: null, project: NO_PROJECT, ageSeconds: null, prUrl: null, decisions: [], blockers: { events: [], ids: [], reason: null },
+    taskId: null, project: NO_PROJECT, ageSeconds: null, lastUpdateSeconds: null, prUrl: null, decisions: [], blockers: { events: [], ids: [], reason: null },
     stateDetail: null, text: [], date: null, badges: [], ...fields,
   });
 
@@ -120,21 +136,25 @@
   // Every board card, classified from the snapshot's structured fields. Status logs
   // are never re-read; free text is only displayed, never matched, except the fixed
   // PR-settled vocabulary above.
-  const cards = (snapshot) => {
+  const cards = (snapshot, { recentLimit = RECENT_LIMIT } = {}) => {
     assertSchema(snapshot);
     const generatedMs = Date.parse(snapshot.generated ?? '') || Date.now();
     const records = snapshot.backlog?.records ?? [];
     const byId = new Map(records.map((r) => [r.id, r]));
     const holdAge = (r) => (r.hold_set && Date.parse(r.hold_set) ? Math.max(0, (generatedMs - Date.parse(r.hold_set)) / 1000)
       : r.hold_age_days == null ? null : r.hold_age_days * DAY);
-    const holdDecision = (r) => ({ key: r.id, kind: 'captain-hold', holdId: r.id, summary: r.hold_reason ?? r.title ?? r.id, until: r.hold_until ?? null });
+    const holdDecision = (r) => ({ key: r.id, kind: 'captain-hold', holdId: r.id, summary: r.hold_reason ?? r.title ?? r.id, until: r.hold_until ?? null, ageSeconds: holdAge(r) });
+    const oldest = (decisions) => decisions.reduce((max, d) => (d.ageSeconds != null && (max == null || d.ageSeconds > max) ? d.ageSeconds : max), null);
     const out = [];
     const taskCards = new Map();
+    const tasksById = new Map((snapshot.tasks ?? []).map((t) => [t.id, t]));
 
     (snapshot.tasks ?? []).forEach((task) => {
       const record = byId.get(task.id) ?? task.backlog ?? null;
       const open = task.hints?.open_decisions ?? [];
-      const decisions = open.filter((d) => d.verb !== 'blocked').map((d) => ({ key: d.key, kind: d.verb, summary: d.summary }));
+      const lastUpdateSeconds = task.paths?.status_log?.last_event?.age_seconds ?? null;
+      // An open status decision has no timestamp of its own, so it ages from the latest status event.
+      const decisions = open.filter((d) => d.verb !== 'blocked').map((d) => ({ key: d.key, kind: d.verb, summary: d.summary, ageSeconds: lastUpdateSeconds }));
       if (record?.hold_bucket === 'live') decisions.push(holdDecision(record));
       const t = {
         kind: task.kind, mode: task.mode, state: task.current_state?.state ?? 'unknown', prUrl: task.pr?.url ?? null,
@@ -142,10 +162,10 @@
         blockedEvents: open.filter((d) => d.verb === 'blocked').map((d) => ({ key: d.key, summary: d.summary })),
         blockerIds: record?.unresolved_blocker_ids ?? [],
       };
-      const ageSeconds = task.paths?.status_log?.last_event?.age_seconds ?? null;
+      const ageSeconds = decisions.length ? oldest(decisions) : lastUpdateSeconds;
       const c = card({
         key: `task:${task.id}`, source: 'task', id: task.id, taskId: task.id, title: record?.title ?? task.id,
-        project: task.project ?? record?.repo ?? NO_PROJECT, ageSeconds, prUrl: t.prUrl, decisions,
+        project: task.project ?? record?.repo ?? NO_PROJECT, ageSeconds, lastUpdateSeconds, prUrl: t.prUrl, decisions,
         blockers: { events: t.blockedEvents, ids: t.blockerIds, reason: record?.blocked_reason ?? null },
         state: t.state, stateDetail: task.current_state?.detail ?? null, kind: task.kind, since: record?.since ?? null,
         text: [record?.body_excerpt, task.hints?.last_event_text].filter(Boolean),
@@ -161,16 +181,21 @@
     // A second mate's own open decisions join its card, or stand alone when it has no task row.
     (snapshot.secondmate_current?.records ?? []).forEach((m) => {
       const owner = taskCards.get(m.id);
+      const home = !m.remote && typeof m.home === 'string' && m.home ? m.home : null;
       (m.decisions_open ?? []).forEach((d) => {
-        const decision = { key: d.key ?? d.id, kind: d.verb ?? 'decision', holdId: d.verb === 'captain-hold' ? d.id : undefined, summary: d.summary ?? d.title ?? '', reason: d.reason ?? null };
+        const decision = {
+          key: d.key ?? d.id, kind: d.verb ?? 'decision', holdId: d.verb === 'captain-hold' ? d.id : undefined, summary: d.summary ?? d.title ?? '', reason: d.reason ?? null,
+          ageSeconds: d.hold_age_days == null ? null : d.hold_age_days * DAY, owner: { id: m.id, home },
+        };
         if (owner) {
           if (owner.decisions.some((x) => x.key === decision.key)) return;
           owner.decisions.push(decision);
+          owner.ageSeconds = oldest(owner.decisions);
           owner.column = decisionColumn(owner.ageSeconds);
-          owner.resolve = resolveSteps(owner, null);
+          owner.resolve = resolveSteps(owner, tasksById.get(m.id));
           return;
         }
-        const ageSeconds = d.hold_age_days == null ? null : d.hold_age_days * DAY;
+        const { ageSeconds } = decision;
         const c = card({ key: `secondmate:${m.id}:${decision.key}`, source: 'secondmate', id: d.id ?? m.id, title: decision.summary, project: m.id, ageSeconds,
           decisions: [decision], text: [d.reason].filter(Boolean), column: decisionColumn(ageSeconds), badges: ['Second mate'] });
         c.resolve = resolveSteps(c, null);
@@ -196,13 +221,28 @@
       out.push(c);
     });
 
-    finishedRecords(snapshot).slice(0, RECENT_LIMIT).forEach((f) => out.push(card({
+    finishedRecords(snapshot).slice(0, recentLimit).forEach((f) => out.push(card({
       key: `done:${f.home ?? ''}:${f.id}`, source: 'finished', id: f.id, title: f.title, project: f.project ?? NO_PROJECT,
       prUrl: /^https?:/.test(f.url ?? '') ? f.url : null, date: f.date, column: 'done', resolve: [],
       text: [f.home && `Finished via ${f.home}`, f.url && !/^https?:/.test(f.url) && f.url].filter(Boolean),
       badges: [f.verb === 'merged' ? 'Merged' : f.verb ? 'Finished' : null].filter(Boolean),
     })));
     return out;
+  };
+
+  const queuedCard = (r) => card({
+    key: `queued:${r.id}`, source: 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT, column: 'queued', resolve: [],
+    since: r.since ?? null, text: [r.hold_reason && `On hold: ${r.hold_reason}`, r.body_excerpt].filter(Boolean), badges: ['Not started'],
+  });
+
+  // Every card any page can show, by key: the board's cards plus all finished work
+  // and every queued row. The detail drawer resolves links through this, so a card
+  // listed outside the board's recent window still opens.
+  const cardRegistry = (snapshot) => {
+    const registry = new Map(cards(snapshot, { recentLimit: Infinity }).map((c) => [c.key, c]));
+    const shown = new Set([...registry.values()].map((c) => c.id));
+    (snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued' && !shown.has(r.id)).forEach((r) => registry.set(`queued:${r.id}`, queuedCard(r)));
+    return registry;
   };
 
   // Oldest first, so the longest waits are on top; recently finished work shows newest first.
@@ -301,16 +341,14 @@
     const [kind, ...rest] = filter.split('/');
     const arg = rest.length ? decodeURIComponent(rest.join('/')) : null;
     const all = cards(snapshot);
+    const registry = [...cardRegistry(snapshot).values()];
+    const queuedIds = new Set((snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued').map((r) => r.id));
     const views = {
       group: () => [GROUPS.find((g) => g.key === arg)?.label ?? arg, all.filter((c) => groupOf(c) === arg)],
       age: () => [`Waiting ${AGE_BUCKETS.find((b) => b.key === arg)?.label.toLowerCase() ?? arg}`,
         all.filter((c) => WAITING.has(c.column) && ageBucketOf(c.ageSeconds) === arg)],
-      queued: () => ['Queued, not started', (snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued').map((r) => card({
-        key: `queued:${r.id}`, source: 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT, column: 'queued', resolve: [],
-        text: [r.hold_reason && `On hold: ${r.hold_reason}`, r.body_excerpt].filter(Boolean),
-      }))],
-      'done-today': () => ['Finished today', finishedRecords(snapshot).filter((f) => f.date === today).map((f) => all.find((c) => c.source === 'finished' && c.id === f.id)
-        ?? card({ key: `done::${f.id}`, source: 'finished', id: f.id, title: f.title, project: f.project ?? NO_PROJECT, date: f.date, column: 'done', resolve: [] }))],
+      queued: () => ['Queued, not started', registry.filter((c) => c.source !== 'finished' && c.source !== 'secondmate' && queuedIds.has(c.id))],
+      'done-today': () => ['Finished today', registry.filter((c) => c.source === 'finished' && c.date === today)],
     };
     if (!Object.hasOwn(views, kind)) return null;
     const [title, list] = views[kind]();
@@ -389,7 +427,7 @@
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
-    cards, workColumn, boardView, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    cards, cardRegistry, workColumn, boardView, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
     duration, localDate,
   };
 });
