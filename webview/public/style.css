@@ -17,3 +17,8 @@ th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8884
 .needs-captain { background: #ffb30022; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding: .5rem; }
 .muted { opacity: .7; }
+#health { padding: .1rem .5rem; border-radius: 4px; font-size: .85rem; }
+.health-ok { background: #1a7f3733; }
+.health-error { background: #b00020; color: #fff; }
+#alerts { background: #b0002018; border-left: 4px solid #b00020; padding: .25rem 1rem; margin: 1rem 0; }
+.command { font-family: ui-monospace, monospace; font-size: .8rem; overflow-wrap: anywhere; }

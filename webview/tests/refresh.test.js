@@ -41,7 +41,7 @@ const until = async (check, ms = 5000) => {
 
 test('first load reports loading, then a timeout with its real reason, without waiting for grandchildren', async (t) => {
   setMode('hang');
-  const app = await start({ home, port: 0, pollMs: 60_000, snapshotTimeoutMs: 300, snapshotScript: script });
+  const app = await start({ home, port: 0, pollMs: 60_000, snapshotTimeoutMs: 300, snapshotScript: script, collectResources: async () => ({}) });
   t.after(() => app.close());
   const loading = await get(app.port);
   assert.equal(loading.status, 503);
@@ -56,7 +56,7 @@ test('first load reports loading, then a timeout with its real reason, without w
 
 test('a failed refresh keeps serving the last good snapshot with the exit code and stderr', async (t) => {
   setMode('ok');
-  const app = await start({ home, port: 0, pollMs: 50, snapshotTimeoutMs: 5000, snapshotScript: script });
+  const app = await start({ home, port: 0, pollMs: 50, snapshotTimeoutMs: 5000, snapshotScript: script, collectResources: async () => ({}) });
   t.after(() => app.close());
   await app.ready;
   const good = await get(app.port);
@@ -81,7 +81,7 @@ test('a failed refresh keeps serving the last good snapshot with the exit code a
 test('polls never overlap even when a run outlasts the poll interval', async (t) => {
   setMode('slow');
   fs.writeFileSync(path.join(dir, 'log'), '');
-  const app = await start({ home, port: 0, pollMs: 10, snapshotTimeoutMs: 5000, snapshotScript: script });
+  const app = await start({ home, port: 0, pollMs: 10, snapshotTimeoutMs: 5000, snapshotScript: script, collectResources: async () => ({}) });
   t.after(() => app.close());
   await until(() => fs.readFileSync(path.join(dir, 'log'), 'utf8').split('\n').filter((l) => l === 'end').length >= 2);
   await app.close();

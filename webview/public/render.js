@@ -148,5 +148,26 @@
     return { tone: refreshing ? 'info' : 'quiet', text: `${age}${refreshing ? ' · refreshing' : ''}` };
   };
 
-  return { SCHEMA, assertSchema, fleetOverview, decisionsInbox, taskDetail, board, freshnessBanner };
+  const bytes = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : `${Math.round(n / 1024 ** 2)} MB`);
+  const duration = (s) => (s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`);
+  const share = (x) => (x == null ? 'n/a' : `${Math.round(x * 100)}%`);
+
+  // Display strings for the resources panel; app.js renders them via textContent.
+  const resourcesView = (r) => ({
+    badge: r.alerts.length
+      ? { tone: 'error', text: `${r.alerts.length} machine alert${r.alerts.length === 1 ? '' : 's'}` }
+      : { tone: 'ok', text: 'Machine OK' },
+    alerts: r.alerts,
+    machine: [
+      ['Load (1 min / 5 min)', `${r.load.oneMinute.toFixed(1)} / ${r.load.fiveMinute.toFixed(1)} on ${r.load.cores} cores`],
+      ['Memory', r.memory ? `${share(r.memory.freeShare)} free, ${share(r.memory.compressedShare)} compressed of ${bytes(r.memory.totalBytes)}` : 'unavailable'],
+      ['Processes', `${r.processes.user} yours${r.processes.limit ? ` of ${r.processes.limit} allowed` : ''} (${r.processes.total} total)`],
+    ],
+    sessions: r.sessions.map((s) => ({
+      name: s.cwd ?? `pid ${s.pid}`, memory: bytes(s.rssBytes), processes: String(s.processes), mcpHelpers: String(s.mcpHelpers), age: duration(s.ageSeconds),
+    })),
+    orphans: r.orphans.map((o) => ({ pid: String(o.pid), command: o.command, memory: bytes(o.rssBytes), age: duration(o.ageSeconds) })),
+  });
+
+  return { SCHEMA, assertSchema, fleetOverview, decisionsInbox, taskDetail, board, freshnessBanner, resourcesView };
 });

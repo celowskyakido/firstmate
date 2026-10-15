@@ -40,7 +40,7 @@ test('parseSnapshot fails loudly on a foreign schema or non-JSON', () => {
 });
 
 test('server: snapshot proxy, task detail, and guards', async (t) => {
-  const app = await start({ home, port: 0, pollMs: 60_000 });
+  const app = await start({ home, port: 0, pollMs: 60_000, resourcesPollMs: 60_000, collectResources: async () => ({ alerts: ['demo alert'] }) });
   t.after(() => app.close());
   await app.ready;
   const { port } = app;
@@ -58,6 +58,11 @@ test('server: snapshot proxy, task detail, and guards', async (t) => {
   assert.equal(detail.status_history.length, 2);
   assert.equal(detail.inbox.pending[0].name, '001.msg');
   assert.equal(detail.inbox.handled[0].text.trim(), 'old steer');
+
+  await app.resourcesReady;
+  const res = await get(port, '/api/resources');
+  assert.deepEqual([res.status, JSON.parse(res.body).alerts, res.headers['x-resources-version']], [200, ['demo alert'], '1']);
+  assert.equal((await get(port, '/api/resources', { method: 'POST' })).status, 405);
 
   assert.equal((await get(port, '/api/task/nope')).status, 404);
   assert.equal((await get(port, '/api/task/..%2F..%2Fetc')).status, 404);

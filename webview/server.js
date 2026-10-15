@@ -7,6 +7,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const resourcesLib = require('./resources');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
 const HOST = '127.0.0.1';
@@ -45,7 +46,7 @@ const killGroup = (child) => { try { process.kill(-child.pid, 'SIGKILL'); } catc
 
 const MAX_OUTPUT = 64 * 1024 * 1024;
 
-// Resolves with the snapshot; `child` lets close() stop a run still in flight.
+// `cancel` lets close() stop a run still in flight.
 // spawn, not execFile: execFile silently drops `detached`.
 const fetchSnapshot = (script, home, timeoutMs) => {
   // Argument array, no shell: nothing from the fleet ever reaches a command line.
@@ -67,7 +68,45 @@ const fetchSnapshot = (script, home, timeoutMs) => {
       try { resolve(parseSnapshot(out.stdout)); } catch (e) { reject(e); }
     });
   });
-  return { child, done };
+  return { done, cancel: () => killGroup(child) };
+};
+
+// The next run is scheduled only after the current one settles, so refreshes
+// never overlap; on a big home one snapshot run can take most of a minute.
+// `startRun` returns { done, cancel }.
+const makePoller = (startRun, pollMs) => {
+  const state = { value: null, version: 0, fetchedAt: null, error: null, refreshing: false, failures: 0 };
+  let timer = null;
+  let running = null;
+  let closed = false;
+  const poll = async () => {
+    state.refreshing = true;
+    try {
+      running = startRun();
+      state.value = await running.done;
+      state.version += 1;
+      state.fetchedAt = new Date().toISOString();
+      state.error = null;
+      state.failures = 0;
+    } catch (e) {
+      state.error = e.message;
+      state.failures += 1;
+      if (!closed) console.error(`webview: ${e.message}`);
+    } finally {
+      state.refreshing = false;
+      running = null;
+    }
+    if (closed) return;
+    // Back off after consecutive failures, capped at 64x the poll interval.
+    timer = setTimeout(poll, pollMs * 2 ** Math.min(state.failures, 6));
+    timer.unref();
+  };
+  const ready = poll();
+  return {
+    state,
+    ready,
+    close: () => { closed = true; clearTimeout(timer); running?.cancel(); },
+  };
 };
 
 const readTail = async (file) => {
@@ -89,39 +128,14 @@ const readInbox = async (dir) => {
   return { pending: await list(dir), handled: await list(path.join(dir, 'handled')) };
 };
 
-async function start({ home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT }) {
+async function start({
+  home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
+  resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(),
+}) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
-  const state = { snapshot: null, version: 0, fetchedAt: null, error: null, refreshing: false, failures: 0 };
-  let timer = null;
-  let running = null;
-  let closed = false;
-
-  // The next poll is scheduled only after the current one settles, so refreshes
-  // never overlap; on a big home one run can take most of a minute.
-  const poll = async () => {
-    state.refreshing = true;
-    try {
-      running = fetchSnapshot(snapshotScript, home, snapshotTimeoutMs);
-      state.snapshot = await running.done;
-      state.version += 1;
-      state.fetchedAt = new Date().toISOString();
-      state.error = null;
-      state.failures = 0;
-    } catch (e) {
-      state.error = e.message;
-      state.failures += 1;
-      if (!closed) console.error(`webview: ${e.message}`);
-    } finally {
-      state.refreshing = false;
-      running = null;
-    }
-    if (closed) return;
-    // Back off after consecutive failures, capped at 64x the poll interval.
-    timer = setTimeout(poll, pollMs * 2 ** Math.min(state.failures, 6));
-    timer.unref();
-  };
-  const firstPoll = poll();
+  const snapshots = makePoller(() => fetchSnapshot(snapshotScript, home, snapshotTimeoutMs), pollMs);
+  const resources = makePoller(() => ({ done: collectResources(), cancel: () => {} }), resourcesPollMs);
 
   const send = (res, status, type, body, extra = {}) => {
     res.writeHead(status, {
@@ -134,6 +148,14 @@ async function start({ home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180
     res.end(body);
   };
   const sendJson = (res, status, value, extra) => send(res, status, 'application/json', JSON.stringify(value), extra);
+  // A failed refresh keeps serving the last good value, flagged as stale.
+  const sendCached = (res, state, name) => {
+    if (!state.value) return sendJson(res, 503, { loading: true, refreshing: state.refreshing, error: state.error });
+    const meta = { [`X-${name}-Version`]: String(state.version), [`X-${name}-Fetched-At`]: state.fetchedAt };
+    if (state.error) meta[`X-${name}-Stale`] = encodeURIComponent(state.error);
+    if (state.refreshing) meta[`X-${name}-Refreshing`] = '1';
+    return sendJson(res, 200, state.value, meta);
+  };
 
   const server = http.createServer(async (req, res) => {
     const { port: boundPort } = server.address();
@@ -150,18 +172,12 @@ async function start({ home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180
         const [file, type] = STATIC[pathname];
         return send(res, 200, type, await fs.promises.readFile(path.join(PUBLIC_DIR, file)));
       }
-      if (pathname === '/api/snapshot') {
-        if (!state.snapshot) return sendJson(res, 503, { loading: true, refreshing: state.refreshing, error: state.error });
-        const meta = { 'X-Snapshot-Version': String(state.version), 'X-Snapshot-Fetched-At': state.fetchedAt };
-        // A failed refresh keeps serving the last good snapshot, flagged as stale.
-        if (state.error) meta['X-Snapshot-Stale'] = encodeURIComponent(state.error);
-        if (state.refreshing) meta['X-Snapshot-Refreshing'] = '1';
-        return sendJson(res, 200, state.snapshot, meta);
-      }
+      if (pathname === '/api/snapshot') return sendCached(res, snapshots.state, 'Snapshot');
+      if (pathname === '/api/resources') return sendCached(res, resources.state, 'Resources');
       const match = pathname.match(/^\/api\/task\/([^/]+)$/);
       if (match) {
         const id = decodeURIComponent(match[1]);
-        const task = TASK_ID.test(id) && state.snapshot?.tasks.find((t) => t.id === id);
+        const task = TASK_ID.test(id) && snapshots.state.value?.tasks.find((t) => t.id === id);
         if (!task) return sendJson(res, 404, { error: 'unknown task' });
         const stateDir = path.join(home, 'state');
         return sendJson(res, 200, {
@@ -183,11 +199,11 @@ async function start({ home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180
     server.listen(port, HOST, () => resolve({
       server,
       port: server.address().port,
-      ready: firstPoll,
+      ready: snapshots.ready,
+      resourcesReady: resources.ready,
       close: () => {
-        closed = true;
-        clearTimeout(timer);
-        if (running) killGroup(running.child);
+        snapshots.close();
+        resources.close();
         return new Promise((r) => server.close(r));
       },
     }));
@@ -207,6 +223,7 @@ if (require.main === module) {
     port: Number(process.env.WEBVIEW_PORT ?? 4780),
     pollMs: Number(process.env.WEBVIEW_POLL_MS ?? 7000),
     snapshotTimeoutMs: Number(process.env.WEBVIEW_SNAPSHOT_TIMEOUT_MS ?? 180_000),
+    resourcesPollMs: Number(process.env.WEBVIEW_RESOURCES_POLL_MS ?? 5000),
   }).then(({ port }) => console.log(`webview: http://${HOST}:${port}/ (read-only)`))
     .catch((e) => { console.error(`webview: ${e.message}`); process.exit(2); });
 }

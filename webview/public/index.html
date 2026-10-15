@@ -9,11 +9,14 @@
 <body>
   <header>
     <h1>Firstmate</h1>
-    <nav><a href="#/">Board</a></nav>
+    <nav><a href="#/">Board</a> <a href="#resources">Resources</a></nav>
+    <span id="health" role="status"></span>
     <span id="freshness" role="status"></span>
   </header>
   <div id="banner" role="status" hidden></div>
+  <section id="alerts" role="alert" hidden></section>
   <main id="view"></main>
+  <section id="resources"></section>
   <script src="/render.js"></script>
   <script src="/app.js"></script>
 </body>

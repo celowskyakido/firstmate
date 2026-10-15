@@ -124,7 +124,53 @@
     }
   };
 
+  const health = document.getElementById('health');
+  const alertsBox = document.getElementById('alerts');
+  const resourcesBox = document.getElementById('resources');
+  const renderResources = (r, freshnessLine) => {
+    const v = R.resourcesView(r);
+    health.className = `health-${v.badge.tone}`;
+    health.textContent = v.badge.text;
+    alertsBox.hidden = !v.alerts.length;
+    alertsBox.replaceChildren(text('h2', 'Machine alerts'), el('ul', {}, v.alerts.map((a) => text('li', a))));
+    resourcesBox.replaceChildren(
+      text('h2', 'Resources'),
+      text('p', freshnessLine, { className: 'muted' }),
+      el('table', {}, v.machine.map(([k, val]) => el('tr', {}, text('th', k), text('td', val)))),
+      text('h3', `Claude sessions (${v.sessions.length}), largest first`),
+      v.sessions.length ? table(['Session', 'Memory', 'Processes', 'MCP helpers', 'Age'], v.sessions.map((x) => el('tr', {},
+        text('td', x.name), text('td', x.memory), text('td', x.processes), text('td', x.mcpHelpers), text('td', x.age)))) : empty('No Claude sessions.'),
+      text('h3', `Orphaned helpers (${v.orphans.length})`),
+      v.orphans.length ? table(['PID', 'Command', 'Memory', 'Age'], v.orphans.map((o) => el('tr', {},
+        text('td', o.pid), text('td', o.command, { className: 'command' }), text('td', o.memory), text('td', o.age)))) : empty('None.'),
+    );
+  };
+
+  let resourcesVersion = null;
+  const refreshResources = async () => {
+    try {
+      const [body, res] = await getJson('/api/resources');
+      if (body.loading) {
+        health.textContent = body.error ? 'Machine check failing' : 'Checking machine…';
+        return;
+      }
+      const line = R.freshnessBanner({
+        fetchedAt: res.headers.get('X-Resources-Fetched-At'),
+        stale: res.headers.get('X-Resources-Stale') && decodeURIComponent(res.headers.get('X-Resources-Stale')),
+      }).text;
+      if (res.headers.get('X-Resources-Version') !== resourcesVersion || res.headers.has('X-Resources-Stale')) {
+        resourcesVersion = res.headers.get('X-Resources-Version');
+        renderResources(body, line);
+      }
+    } catch (e) {
+      health.className = 'health-error';
+      health.textContent = `Machine check unavailable: ${e.message}`;
+    }
+  };
+
   window.addEventListener('hashchange', () => { taskDetail = null; render(); refresh(); });
   refresh();
+  refreshResources();
   setInterval(refresh, 3000);
+  setInterval(refreshResources, 5000);
 })();
