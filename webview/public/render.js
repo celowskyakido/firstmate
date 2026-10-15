@@ -1,5 +1,5 @@
 // Pure view-model builders over an `fm-fleet-snapshot.v1` object. No DOM and no
-// derivation of fleet state: every field is read from the snapshot as published.
+// re-folding of status logs: every field is read from the snapshot as published.
 // Values stay raw strings; app.js is the only place they reach the DOM, via textContent.
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -16,105 +16,98 @@
     return snapshot;
   };
 
-  const backlogById = (snapshot) => new Map((snapshot.backlog?.records ?? []).map((r) => [r.id, r]));
-
-  const waitsOn = (task, backlog) => {
-    const decisions = (task.hints?.open_decisions ?? []).map((d) => `${d.verb}: ${d.summary}`);
-    const hold = backlog?.hold_reason ? [`hold: ${backlog.hold_reason}`] : [];
-    const blockers = backlog?.unresolved_blocker_ids?.length ? [`blocked by ${backlog.unresolved_blocker_ids.join(', ')}`] : [];
-    return [...decisions, ...hold, ...blockers];
-  };
-
-  const fleetOverview = (snapshot) => {
-    assertSchema(snapshot);
-    const backlog = backlogById(snapshot);
-    return {
-      generated: snapshot.generated,
-      tasks: (snapshot.tasks ?? []).map((t) => ({
-        id: t.id,
-        kind: t.kind,
-        project: t.project,
-        title: t.backlog?.title ?? null,
-        state: t.current_state?.state ?? 'unknown',
-        stateDetail: t.current_state?.detail ?? null,
-        waitsOn: waitsOn(t, backlog.get(t.id)),
-        prUrl: t.pr?.url ?? null,
-        endpointExists: t.endpoint?.exists ?? null,
-        agentAlive: t.endpoint?.agent_alive ?? null,
-        needsCaptain: Boolean(t.hints?.pending_decision || t.hints?.blocked_event),
-        // Time since the task's last status event, relative to the snapshot.
-        ageSeconds: t.paths?.status_log?.last_event?.age_seconds ?? null,
-        since: t.backlog?.since ?? null,
-      })),
-      secondmates: (snapshot.secondmate_current?.records ?? []).map((r) => ({
-        id: r.id,
-        state: r.current?.state ?? 'unknown',
-        activeChildren: r.active_children?.length ?? 0,
-        decisionsOpen: r.decisions_open?.length ?? 0,
-        holds: r.holds?.length ?? 0,
-        queued: r.queued?.length ?? 0,
-      })),
-    };
-  };
-
-  // Decisions come only from the snapshot's own buckets: the keyed open-decision
-  // fold (hints.open_decisions), live captain holds (hold_bucket === 'live'), and
-  // secondmates' decisions_open. status logs are never re-read or re-folded here.
-  const decisionsInbox = (snapshot) => {
-    assertSchema(snapshot);
-    const taskIds = new Set((snapshot.tasks ?? []).map((t) => t.id));
-    const link = (id) => (taskIds.has(id) ? id : null);
-    const fromStatus = (snapshot.tasks ?? []).flatMap((t) => (t.hints?.open_decisions ?? []).map((d) => ({
-      source: 'status', id: t.id, taskId: t.id, key: d.key, kind: d.verb, summary: d.summary, project: t.project,
-      ageSeconds: t.paths?.status_log?.last_event?.age_seconds ?? null,
-    })));
-    const fromHolds = (snapshot.backlog?.records ?? []).filter((r) => r.hold_bucket === 'live').map((r) => ({
-      source: 'hold', id: r.id, taskId: link(r.id), key: r.id, kind: 'captain-hold', summary: r.title,
-      reason: r.hold_reason, holdUntil: r.hold_until, ageDays: r.hold_age_days, project: r.repo,
-      ageSeconds: r.hold_age_days == null ? null : r.hold_age_days * DAY,
-    }));
-    const fromSecondmates = (snapshot.secondmate_current?.records ?? []).flatMap((m) => (m.decisions_open ?? []).map((d) => ({
-      source: `secondmate ${m.id}`, id: d.id ?? d.key ?? m.id, taskId: link(m.id), key: d.key ?? d.id,
-      kind: d.verb ?? 'decision', summary: d.summary ?? d.title ?? '', reason: d.reason ?? null,
-      ageSeconds: d.hold_age_days == null ? null : d.hold_age_days * DAY,
-    })));
-    return { generated: snapshot.generated, items: [...fromStatus, ...fromHolds, ...fromSecondmates] };
-  };
-
+  // Task history for the detail drawer. Labelled history on purpose: wake events are never current state.
   const taskDetail = (snapshot, id, detail) => {
     assertSchema(snapshot);
-    const task = (snapshot.tasks ?? []).find((t) => t.id === id);
-    if (!task) return null;
-    return {
-      id,
-      kind: task.kind,
-      project: task.project,
-      harness: task.harness,
-      mode: task.mode,
-      title: task.backlog?.title ?? null,
-      state: task.current_state?.state ?? 'unknown',
-      stateSource: task.current_state?.source ?? null,
-      stateDetail: task.current_state?.detail ?? null,
-      waitsOn: waitsOn(task, task.backlog),
-      prUrl: task.pr?.url ?? null,
-      statusLabel: statusLabelOf(fleetOverview(snapshot).tasks.find((t) => t.id === id)),
-      ageSeconds: task.paths?.status_log?.last_event?.age_seconds ?? null,
-      since: task.backlog?.since ?? null,
-      endpoint: task.endpoint ?? null,
-      // Labelled history on purpose: wake events are never current state.
-      lastEvent: task.paths?.status_log?.last_event ?? null,
-      statusHistory: detail?.status_history ?? [],
-      inbox: detail?.inbox ?? { pending: [], handled: [] },
-    };
+    if (!(snapshot.tasks ?? []).some((t) => t.id === id)) return null;
+    return { id, statusHistory: detail?.status_history ?? [], inbox: detail?.inbox ?? { pending: [], handled: [] } };
   };
 
-  const ASK_LABEL = { 'needs-decision': 'Needs a decision', blocked: 'Blocked', 'captain-hold': 'Your call', decision: 'Needs a decision' };
   // fm-crew-state.sh's fixed detail vocabulary for a passed run whose PR no longer awaits a merge call.
   const PR_SETTLED = /\bPR (merged|closed)\b/;
   const RECENT_LIMIT = 15;
   const NO_PROJECT = '(no project)';
+  // A decision the captain has not answered in this long moves to its own column.
+  const AGING_AFTER = 3 * DAY;
 
-  const isReviewReady = (t) => t.state === 'done' && Boolean(t.prUrl) && !PR_SETTLED.test(t.stateDetail ?? '');
+  // Board columns, left to right.
+  const COLUMNS = [
+    { key: 'decide', label: 'Needs your decision', group: 'needs' },
+    { key: 'aging', label: 'Aging decisions', group: 'needs' },
+    { key: 'blocked', label: 'Blocked', group: 'blocked' },
+    { key: 'working', label: 'Working', group: 'working' },
+    { key: 'review', label: 'Waiting on review', group: 'review' },
+    { key: 'land', label: 'Ready to land', group: 'land' },
+    { key: 'done', label: 'Done (recent)', group: 'done' },
+  ];
+  // Colour groups in the fixed order the palette was validated in (adjacent pairs
+  // clear the colour-vision checks only in this order); charts stack in this order.
+  const GROUPS = [
+    { key: 'needs', label: 'Decisions' },
+    { key: 'blocked', label: 'Blocked' },
+    { key: 'review', label: 'Waiting on review' },
+    { key: 'working', label: 'Working' },
+    { key: 'land', label: 'Ready to land' },
+    { key: 'done', label: 'Done' },
+  ];
+  const columnOf = (key) => COLUMNS.find((c) => c.key === key);
+
+  const localDate = (date) => date.toLocaleDateString('en-CA');
+  // Some homes record a project as its clone path; show only the folder name.
+  const projectName = (p) => (p && p.includes('/') ? p.replace(/\/+$/, '').split('/').pop() : p ?? NO_PROJECT);
+  const prNumber = (url) => url?.match(/\/(?:pull|merge_requests)\/(\d+)/)?.[1] ?? null;
+  const decisionColumn = (ageSeconds) => (ageSeconds != null && ageSeconds >= AGING_AFTER ? 'aging' : 'decide');
+  const isNoMistakes = (mode) => /^no-mistakes/.test(mode ?? '');
+
+  // Where an undecided task sits, from structured fields only: blocked events,
+  // current state, unresolved blockers, the PR and whether it settled, and the
+  // delivery mode. A no-mistakes run that passed has been reviewed and is waiting
+  // on a merge call; a direct PR still needs its review.
+  const workColumn = (t) => {
+    if (t.blockedEvents.length || t.state === 'blocked' || t.state === 'failed' || t.blockerIds.length) return 'blocked';
+    if (t.state === 'done') {
+      if (!t.prUrl) return t.kind === 'scout' ? 'review' : 'land';
+      if (t.isPrSettled) return 'done';
+      return isNoMistakes(t.mode) ? 'land' : 'review';
+    }
+    if (t.prUrl && (t.state === 'paused' || t.state === 'unknown')) return 'review';
+    return 'working';
+  };
+
+  const steerTarget = (task) => task.actions?.steer?.split(/\s+/)[1] ?? null;
+
+  // Suggested ways to resolve a card: what to tell firstmate, and the command it
+  // would run. The web view never runs them.
+  const resolveSteps = (c, task) => {
+    const target = task && steerTarget(task);
+    const steps = c.decisions.flatMap((d) => (d.kind === 'captain-hold'
+      ? [{ label: 'Tell firstmate', text: `Decision on ${d.holdId ?? c.id}: <your call>` },
+        { label: 'Command firstmate would run', text: `bin/fm-captain-hold.sh answer ${d.holdId ?? c.id} --decision-file <file with your answer> --release` }]
+      : [{ label: 'Tell firstmate', text: `For ${c.id} (${d.summary}): <your answer>` },
+        target && { label: 'Command firstmate would run', text: `bin/fm-send.sh ${target} --resolve-key ${d.key} '<your answer>'` }]));
+    if (steps.length) return steps.filter(Boolean);
+    const blockedEvent = c.blockers.events[0];
+    if (blockedEvent) {
+      return [{ label: 'Tell firstmate', text: `Unblock ${c.id}: <what it should do>` },
+        target && blockedEvent.key && { label: 'Command firstmate would run', text: `bin/fm-send.sh ${target} --resolve-key ${blockedEvent.key} '<what it should do>'` }].filter(Boolean);
+    }
+    if (c.blockers.ids.length) return [{ label: 'Clears on its own', text: `Starts once ${c.blockers.ids.join(', ')} ${c.blockers.ids.length === 1 ? 'lands' : 'land'}.` }];
+    if (c.column === 'land' && c.prUrl) {
+      return [{ label: 'Tell firstmate', text: `Merge ${c.prUrl}` }, { label: 'Command firstmate would run', text: `bin/fm-pr-merge.sh ${c.id} ${c.prUrl}` }];
+    }
+    if (c.column === 'land') return [{ label: 'Tell firstmate', text: `Land ${c.id}` }, { label: 'Command firstmate would run', text: `bin/fm-merge-local.sh ${c.id}` }];
+    if (c.column === 'review' && c.prUrl) {
+      return [{ label: 'Tell firstmate', text: `Merge ${c.prUrl}` }, { label: 'Or ask for changes', text: `Changes needed on ${c.id}: <what to change>` }];
+    }
+    if (c.column === 'review' && task?.paths?.report?.path) return [{ label: 'Read the findings', text: task.paths.report.path }];
+    if (c.column === 'working' && task?.actions?.watch) return [{ label: 'Watch the worker', text: task.actions.watch }];
+    return [];
+  };
+
+  const card = (fields) => ({
+    taskId: null, project: NO_PROJECT, ageSeconds: null, prUrl: null, decisions: [], blockers: { events: [], ids: [], reason: null },
+    stateDetail: null, text: [], date: null, badges: [], ...fields,
+  });
 
   const finishedRecords = (snapshot) => [
     ...(snapshot.backlog?.records ?? []).filter((r) => r.state === 'done'),
@@ -124,95 +117,128 @@
     verb: r.completion?.verb ?? null, date: r.completion?.date ?? r.done ?? null, url: r.pr_url ?? r.report_path ?? null,
   })).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
 
-  // One status board: what needs the captain, work in flight by project, and
-  // recently finished rows. Every bucket is a snapshot field, never a status-log fold.
-  const board = (snapshot) => {
-    const { tasks } = fleetOverview(snapshot);
-    const asks = decisionsInbox(snapshot).items.map((d) => ({
-      label: ASK_LABEL[d.kind] ?? d.kind, taskId: d.taskId, project: d.project ?? null, title: d.summary,
-      detail: [d.reason, d.holdUntil && `until ${d.holdUntil}`, d.ageDays != null && `${d.ageDays}d old`].filter(Boolean).join(' · '),
-      id: d.id, prUrl: null, source: d.source, ageSeconds: d.ageSeconds ?? null,
-    }));
-    const reviews = tasks.filter(isReviewReady).map((t) => ({
-      id: t.id, label: 'PR ready for review', taskId: t.id, project: t.project, title: t.title ?? t.id, detail: t.stateDetail ?? '', prUrl: t.prUrl, source: 'task',
-      ageSeconds: t.ageSeconds,
-    }));
-    const byProject = new Map();
-    tasks.forEach((t) => byProject.set(t.project ?? NO_PROJECT, [...(byProject.get(t.project ?? NO_PROJECT) ?? []), t]));
-    return {
-      asks,
-      reviews,
-      needsCaptain: [...asks, ...reviews],
-      inFlight: [...byProject].sort(([a], [b]) => a.localeCompare(b)).map(([project, list]) => ({ project, tasks: list })),
-      finished: finishedRecords(snapshot).slice(0, RECENT_LIMIT),
-    };
+  // Every board card, classified from the snapshot's structured fields. Status logs
+  // are never re-read; free text is only displayed, never matched, except the fixed
+  // PR-settled vocabulary above.
+  const cards = (snapshot) => {
+    assertSchema(snapshot);
+    const generatedMs = Date.parse(snapshot.generated ?? '') || Date.now();
+    const records = snapshot.backlog?.records ?? [];
+    const byId = new Map(records.map((r) => [r.id, r]));
+    const holdAge = (r) => (r.hold_set && Date.parse(r.hold_set) ? Math.max(0, (generatedMs - Date.parse(r.hold_set)) / 1000)
+      : r.hold_age_days == null ? null : r.hold_age_days * DAY);
+    const holdDecision = (r) => ({ key: r.id, kind: 'captain-hold', holdId: r.id, summary: r.hold_reason ?? r.title ?? r.id, until: r.hold_until ?? null });
+    const out = [];
+    const taskCards = new Map();
+
+    (snapshot.tasks ?? []).forEach((task) => {
+      const record = byId.get(task.id) ?? task.backlog ?? null;
+      const open = task.hints?.open_decisions ?? [];
+      const decisions = open.filter((d) => d.verb !== 'blocked').map((d) => ({ key: d.key, kind: d.verb, summary: d.summary }));
+      if (record?.hold_bucket === 'live') decisions.push(holdDecision(record));
+      const t = {
+        kind: task.kind, mode: task.mode, state: task.current_state?.state ?? 'unknown', prUrl: task.pr?.url ?? null,
+        isPrSettled: PR_SETTLED.test(task.current_state?.detail ?? '') || Boolean(record?.merged),
+        blockedEvents: open.filter((d) => d.verb === 'blocked').map((d) => ({ key: d.key, summary: d.summary })),
+        blockerIds: record?.unresolved_blocker_ids ?? [],
+      };
+      const ageSeconds = task.paths?.status_log?.last_event?.age_seconds ?? null;
+      const c = card({
+        key: `task:${task.id}`, source: 'task', id: task.id, taskId: task.id, title: record?.title ?? task.id,
+        project: task.project ?? record?.repo ?? NO_PROJECT, ageSeconds, prUrl: t.prUrl, decisions,
+        blockers: { events: t.blockedEvents, ids: t.blockerIds, reason: record?.blocked_reason ?? null },
+        state: t.state, stateDetail: task.current_state?.detail ?? null, kind: task.kind, since: record?.since ?? null,
+        text: [record?.body_excerpt, task.hints?.last_event_text].filter(Boolean),
+        column: decisions.length ? decisionColumn(ageSeconds) : workColumn(t),
+        badges: [t.state === 'unknown' && 'No live status', t.state === 'failed' && 'Failed', t.state === 'paused' && 'Paused',
+          t.state === 'parked' && 'Parked', task.kind === 'scout' && 'Investigation', task.kind === 'secondmate' && 'Second mate'].filter(Boolean),
+      });
+      c.resolve = resolveSteps(c, task);
+      taskCards.set(task.id, c);
+      out.push(c);
+    });
+
+    // A second mate's own open decisions join its card, or stand alone when it has no task row.
+    (snapshot.secondmate_current?.records ?? []).forEach((m) => {
+      const owner = taskCards.get(m.id);
+      (m.decisions_open ?? []).forEach((d) => {
+        const decision = { key: d.key ?? d.id, kind: d.verb ?? 'decision', holdId: d.verb === 'captain-hold' ? d.id : undefined, summary: d.summary ?? d.title ?? '', reason: d.reason ?? null };
+        if (owner) {
+          if (owner.decisions.some((x) => x.key === decision.key)) return;
+          owner.decisions.push(decision);
+          owner.column = decisionColumn(owner.ageSeconds);
+          owner.resolve = resolveSteps(owner, null);
+          return;
+        }
+        const ageSeconds = d.hold_age_days == null ? null : d.hold_age_days * DAY;
+        const c = card({ key: `secondmate:${m.id}:${decision.key}`, source: 'secondmate', id: d.id ?? m.id, title: decision.summary, project: m.id, ageSeconds,
+          decisions: [decision], text: [d.reason].filter(Boolean), column: decisionColumn(ageSeconds), badges: ['Second mate'] });
+        c.resolve = resolveSteps(c, null);
+        out.push(c);
+      });
+    });
+
+    // Backlog rows with no task: live holds are decisions, rows waiting on unfinished work are blocked.
+    records.filter((r) => !taskCards.has(r.id) && r.state !== 'done').forEach((r) => {
+      const blockerIds = r.unresolved_blocker_ids ?? [];
+      const isHeld = r.hold_bucket === 'live';
+      if (!isHeld && !blockerIds.length) return;
+      const ageSeconds = isHeld ? holdAge(r) : null;
+      const c = card({
+        key: `${isHeld ? 'hold' : 'queued'}:${r.id}`, source: isHeld ? 'hold' : 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT,
+        ageSeconds, prUrl: r.pr_url ?? null, decisions: isHeld ? [holdDecision(r)] : [],
+        blockers: { events: [], ids: blockerIds, reason: r.blocked_reason ?? null }, since: r.since ?? null,
+        text: [r.body_excerpt].filter(Boolean),
+        column: blockerIds.length ? 'blocked' : decisionColumn(ageSeconds),
+        badges: [isHeld ? 'Your call' : 'Not started'],
+      });
+      c.resolve = resolveSteps(c, null);
+      out.push(c);
+    });
+
+    finishedRecords(snapshot).slice(0, RECENT_LIMIT).forEach((f) => out.push(card({
+      key: `done:${f.home ?? ''}:${f.id}`, source: 'finished', id: f.id, title: f.title, project: f.project ?? NO_PROJECT,
+      prUrl: /^https?:/.test(f.url ?? '') ? f.url : null, date: f.date, column: 'done', resolve: [],
+      text: [f.home && `Finished via ${f.home}`, f.url && !/^https?:/.test(f.url) && f.url].filter(Boolean),
+      badges: [f.verb === 'merged' ? 'Merged' : f.verb ? 'Finished' : null].filter(Boolean),
+    })));
+    return out;
   };
 
-  // Dashboard state classes, in the fixed order the palette was validated in
-  // (adjacent pairs clear the colour-vision checks only in this order).
-  const BUCKETS = [
-    { key: 'needs', label: 'Needs you' },
-    { key: 'blocked', label: 'Blocked' },
-    { key: 'waiting', label: 'Waiting' },
-    { key: 'working', label: 'Working' },
-    { key: 'done', label: 'Done' },
-    { key: 'unknown', label: 'Status unknown' },
-  ];
-  const BUCKET_OF_STATE = { blocked: 'blocked', failed: 'blocked', paused: 'waiting', parked: 'waiting', working: 'working', done: 'done' };
-  const bucketOf = (t) => (t.needsCaptain || isReviewReady(t) ? 'needs' : BUCKET_OF_STATE[t.state] ?? 'unknown');
-  const bucketLabel = (key) => BUCKETS.find((b) => b.key === key)?.label ?? key;
-  const statusLabelOf = (t) => (t.state === 'failed' && bucketOf(t) === 'blocked' ? 'Failed' : bucketLabel(bucketOf(t)));
+  // Oldest first, so the longest waits are on top; recently finished work shows newest first.
+  const byAge = (a, b) => (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1);
+  const byDate = (a, b) => (b.date ?? '9999').localeCompare(a.date ?? '9999');
 
-  const AGE_BUCKETS = [
-    { key: 'hour', label: 'Under 1 h', below: HOUR },
-    { key: 'hours', label: '1-6 h', below: 6 * HOUR },
-    { key: 'day', label: '6-24 h', below: DAY },
-    { key: 'days', label: '1-3 days', below: 3 * DAY },
-    { key: 'week', label: '3-7 days', below: 7 * DAY },
-    { key: 'older', label: 'Over a week', below: Infinity },
-  ];
-  const ageBucketOf = (seconds) => (seconds == null ? null : AGE_BUCKETS.find((b) => seconds < b.below).key);
+  const matches = (c, query) => !query || [c.title, c.id, projectName(c.project), c.stateDetail, ...c.decisions.map((d) => d.summary), ...c.blockers.events.map((e) => e.summary)]
+    .some((v) => (v ?? '').toLowerCase().includes(query.toLowerCase()));
 
-  const localDate = (date) => date.toLocaleDateString('en-CA');
-  // Some homes record a project as its clone path; show only the folder name.
-  const projectName = (p) => (p && p.includes('/') ? p.replace(/\/+$/, '').split('/').pop() : p ?? NO_PROJECT);
-
-  const taskRow = (t) => ({
-    id: t.id, taskId: t.id, title: t.title ?? t.id, project: projectName(t.project), bucket: bucketOf(t),
-    label: statusLabelOf(t), detail: t.stateDetail ?? '', waitsOn: t.waitsOn, prUrl: t.prUrl, ageSeconds: t.ageSeconds,
-  });
-  const askRow = (a) => ({
-    id: a.id ?? a.taskId, taskId: a.taskId, title: a.title, project: projectName(a.project), bucket: 'needs',
-    label: a.label, detail: a.detail, waitsOn: [], prUrl: a.prUrl, ageSeconds: a.ageSeconds,
-  });
-  const queuedRow = (r) => ({
-    id: r.id, taskId: null, title: r.title ?? r.id, project: projectName(r.repo), bucket: null,
-    label: r.hold_reason ? 'On hold' : 'Queued', detail: r.hold_reason ?? r.blocked_reason ?? '', waitsOn: [], prUrl: r.pr_url ?? null,
-    ageSeconds: null,
-  });
-  const finishedRow = (f) => ({
-    id: f.id, taskId: null, title: f.title, project: projectName(f.project), bucket: 'done',
-    label: f.date ? `Finished ${f.date}` : 'Finished', detail: f.home ? `via ${f.home}` : '', waitsOn: [], prUrl: f.url, ageSeconds: null,
-  });
-
-  // Items waiting on someone: the captain's asks and reviews, plus blocked work.
-  const waitingRows = (snapshot) => {
-    const { asks, reviews } = board(snapshot);
-    const blocked = fleetOverview(snapshot).tasks.filter((t) => bucketOf(t) === 'blocked').map(taskRow);
-    return [...asks.map(askRow), ...reviews.map(askRow), ...blocked];
+  // The kanban: every column, filtered by search text and project.
+  const boardView = (all, { query = '', project = '' } = {}) => {
+    const shown = all.filter((c) => matches(c, query.trim()) && (!project || c.project === project));
+    return COLUMNS.map((col) => ({
+      ...col, cards: shown.filter((c) => c.column === col.key).sort(col.key === 'done' ? byDate : byAge),
+      total: all.filter((c) => c.column === col.key).length,
+    }));
   };
+
+  const projects = (all) => [...new Set(all.map((c) => c.project))].sort((a, b) => projectName(a).localeCompare(projectName(b)))
+    .map((value) => ({ value, label: projectName(value) }));
 
   // Headline counts. The server samples these per snapshot for the trend sparklines.
   const fleetCounts = (snapshot, today = localDate(new Date())) => {
-    const { tasks } = fleetOverview(snapshot);
-    const { asks, reviews } = board(snapshot);
+    const all = cards(snapshot);
+    const count = (key) => all.filter((c) => c.column === key).length;
+    const tasks = snapshot.tasks ?? [];
     return {
-      needsYou: asks.length + reviews.length,
-      needsDecision: asks.length,
-      reviews: reviews.length,
-      blocked: tasks.filter((t) => bucketOf(t) === 'blocked').length,
-      inProgress: tasks.filter((t) => t.state !== 'done').length,
+      needsYou: count('decide') + count('aging') + count('review') + count('land'),
+      decide: count('decide'),
+      aging: count('aging'),
+      blocked: count('blocked'),
+      working: count('working'),
+      review: count('review'),
+      land: count('land'),
       queued: (snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued').length,
+      inProgress: tasks.filter((t) => t.current_state?.state !== 'done').length,
       doneToday: finishedRecords(snapshot).filter((f) => f.date === today).length,
     };
   };
@@ -227,60 +253,68 @@
     orphans: r.orphans?.length ?? null,
   });
 
+  const groupOf = (c) => columnOf(c.column)?.group;
+
   const stateBreakdown = (snapshot) => {
-    const tasks = fleetOverview(snapshot).tasks;
-    return BUCKETS.map((b) => ({ ...b, count: tasks.filter((t) => bucketOf(t) === b.key).length, href: `#/list/state/${b.key}` }));
+    const all = cards(snapshot);
+    return GROUPS.map((g) => ({ ...g, count: all.filter((c) => groupOf(c) === g.key).length, href: `#/list/group/${g.key}` }));
   };
 
-  // Top projects by task count, the rest folded into one row rather than more rows.
+  // Open work per project by colour group, the tail folded into one row rather than more rows.
   const projectBars = (snapshot, max = 8) => {
-    const rows = board(snapshot).inFlight.map(({ project, tasks }) => ({
-      project: projectName(project), total: tasks.length, href: `#/list/project/${encodeURIComponent(project)}`,
-      segments: BUCKETS.map((b) => ({ key: b.key, label: b.label, count: tasks.filter((t) => bucketOf(t) === b.key).length })),
+    const open = cards(snapshot).filter((c) => c.column !== 'done');
+    const byProject = new Map();
+    open.forEach((c) => byProject.set(c.project, [...(byProject.get(c.project) ?? []), c]));
+    const segmentsOf = (list) => GROUPS.filter((g) => g.key !== 'done').map((g) => ({ key: g.key, label: g.label, count: list.filter((c) => groupOf(c) === g.key).length }));
+    const rows = [...byProject].map(([project, list]) => ({
+      project: projectName(project), total: list.length, href: `#/board?project=${encodeURIComponent(project)}`, segments: segmentsOf(list),
     })).sort((a, b) => b.total - a.total || a.project.localeCompare(b.project));
     if (rows.length <= max) return rows;
     const rest = rows.slice(max - 1);
     return [...rows.slice(0, max - 1), {
-      project: `${rest.length} other projects`, total: rest.reduce((n, r) => n + r.total, 0), href: '#/list/in-progress',
-      segments: BUCKETS.map((b, i) => ({ ...rest[0].segments[i], count: rest.reduce((n, r) => n + r.segments[i].count, 0) })),
+      project: `${rest.length} other projects`, total: rest.reduce((n, r) => n + r.total, 0), href: '#/board',
+      segments: rest[0].segments.map((s, i) => ({ ...s, count: rest.reduce((n, r) => n + r.segments[i].count, 0) })),
     }];
   };
 
+  const AGE_BUCKETS = [
+    { key: 'hour', label: 'Under 1 h', below: HOUR },
+    { key: 'hours', label: '1-6 h', below: 6 * HOUR },
+    { key: 'day', label: '6-24 h', below: DAY },
+    { key: 'days', label: '1-3 days', below: AGING_AFTER },
+    { key: 'week', label: '3-7 days', below: 7 * DAY },
+    { key: 'older', label: 'Over a week', below: Infinity },
+  ];
+  const ageBucketOf = (seconds) => (seconds == null ? null : AGE_BUCKETS.find((b) => seconds < b.below).key);
+  const WAITING = new Set(['decide', 'aging', 'blocked', 'review', 'land']);
+
   const ageHistogram = (snapshot) => {
-    const rows = waitingRows(snapshot);
+    const waiting = cards(snapshot).filter((c) => WAITING.has(c.column));
     return {
-      bins: AGE_BUCKETS.map((b) => ({ key: b.key, label: b.label, count: rows.filter((r) => ageBucketOf(r.ageSeconds) === b.key).length, href: `#/list/age/${b.key}` })),
-      unknownAge: rows.filter((r) => r.ageSeconds == null).length,
+      bins: AGE_BUCKETS.map((b) => ({ key: b.key, label: b.label, count: waiting.filter((c) => ageBucketOf(c.ageSeconds) === b.key).length, href: `#/list/age/${b.key}` })),
+      unknownAge: waiting.filter((c) => c.ageSeconds == null).length,
     };
   };
 
-  // A drill-down list for a route filter such as `blocked`, `state/working`, `project/<name>`, or `age/day`.
+  // Card lists behind chart segments and tiles: `group/<key>`, `age/<bucket>`, `queued`, `done-today`.
   const listView = (snapshot, filter, today = localDate(new Date())) => {
     const [kind, ...rest] = filter.split('/');
     const arg = rest.length ? decodeURIComponent(rest.join('/')) : null;
-    const tasks = fleetOverview(snapshot).tasks;
-    const { asks, reviews } = board(snapshot);
-    const queued = (snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued');
-    const byBucket = (key) => tasks.filter((t) => bucketOf(t) === key).map(taskRow);
+    const all = cards(snapshot);
     const views = {
-      needs: () => ['Needs you', [...asks, ...reviews].map(askRow)],
-      'needs-decision': () => ['Needs your decision', asks.map(askRow)],
-      reviews: () => ['Waiting on review', reviews.map(askRow)],
-      blocked: () => ['Blocked', byBucket('blocked')],
-      'in-progress': () => ['In progress', tasks.filter((t) => t.state !== 'done').map(taskRow)],
-      queued: () => ['Queued', queued.map(queuedRow)],
-      'done-today': () => ['Finished today', finishedRecords(snapshot).filter((f) => f.date === today).map(finishedRow)],
-      finished: () => ['Recently finished', finishedRecords(snapshot).slice(0, RECENT_LIMIT).map(finishedRow)],
-      state: () => [bucketLabel(arg), byBucket(arg)],
-      project: () => [`Project ${projectName(arg)}`, [
-        ...tasks.filter((t) => (t.project ?? NO_PROJECT) === arg).map(taskRow),
-        ...queued.filter((r) => (r.repo ?? NO_PROJECT) === arg).map(queuedRow)]],
+      group: () => [GROUPS.find((g) => g.key === arg)?.label ?? arg, all.filter((c) => groupOf(c) === arg)],
       age: () => [`Waiting ${AGE_BUCKETS.find((b) => b.key === arg)?.label.toLowerCase() ?? arg}`,
-        waitingRows(snapshot).filter((r) => ageBucketOf(r.ageSeconds) === arg)],
+        all.filter((c) => WAITING.has(c.column) && ageBucketOf(c.ageSeconds) === arg)],
+      queued: () => ['Queued, not started', (snapshot.backlog?.records ?? []).filter((r) => r.state === 'queued').map((r) => card({
+        key: `queued:${r.id}`, source: 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT, column: 'queued', resolve: [],
+        text: [r.hold_reason && `On hold: ${r.hold_reason}`, r.body_excerpt].filter(Boolean),
+      }))],
+      'done-today': () => ['Finished today', finishedRecords(snapshot).filter((f) => f.date === today).map((f) => all.find((c) => c.source === 'finished' && c.id === f.id)
+        ?? card({ key: `done::${f.id}`, source: 'finished', id: f.id, title: f.title, project: f.project ?? NO_PROJECT, date: f.date, column: 'done', resolve: [] }))],
     };
     if (!Object.hasOwn(views, kind)) return null;
-    const [title, items] = views[kind]();
-    return { title, items: [...items].sort((a, b) => (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1)) };
+    const [title, list] = views[kind]();
+    return { title, cards: [...list].sort(byAge) };
   };
 
   const ago = (ms) => {
@@ -321,38 +355,37 @@
     orphans: r.orphans.map((o) => ({ pid: String(o.pid), command: o.command, memory: bytes(o.rssBytes), age: duration(o.ageSeconds) })),
   });
 
-  const TONE_NOTE = { alert: 'Needs attention', warn: 'Waiting on you', ok: 'Healthy', quiet: '' };
-
-  // KPI tiles: counts from the snapshot, machine figures from the latest reading,
-  // sparklines from the server's trend history. Each tile links to its drill-down.
+  // KPI strip: one tile per waiting column plus finished today and the machine.
+  // Each links to its column or page; sparklines come from the server's trend history.
   const kpis = ({ counts, machine, limits = {}, history = { fleet: [], machine: [] } }) => {
-    const fleetSeries = (k) => history.fleet.map((p) => p[k]);
-    const machineSeries = (k) => history.machine.map((p) => p[k]);
-    const tile = (key, label, value, tone, href, series, note = TONE_NOTE[tone]) => ({
-      key, label, value: value == null ? 'n/a' : String(value), tone: value == null ? 'quiet' : tone, note: value == null ? 'Not measured yet' : note, href, series,
-    });
+    const series = (k) => history.fleet.map((p) => p[k] ?? null);
     const c = counts ?? {};
+    const tile = (key, label, value, tone, href, trend, note) => ({
+      key, label, value: value == null ? 'n/a' : String(value), tone: value == null ? 'quiet' : tone, note: value == null ? 'Not measured yet' : note, href, series: trend,
+    });
+    const column = (key, label, isUrgent, notes) => tile(key, label, c[key], c[key] ? (isUrgent ? 'alert' : 'warn') : 'ok', `#/board/${key}`, series(key), c[key] ? notes[0] : notes[1]);
     const loadPerCore = machine?.load != null && machine.cores ? machine.load / machine.cores : null;
+    const isOverloaded = loadPerCore > (limits.loadPerCore ?? 2);
     return [
-      tile('needs-decision', 'Needs your decision', c.needsDecision, c.needsDecision ? 'warn' : 'ok', '#/list/needs-decision', fleetSeries('needsDecision'), c.needsDecision ? 'Waiting on you' : 'Nothing waiting'),
-      tile('blocked', 'Blocked', c.blocked, c.blocked ? 'alert' : 'ok', '#/list/blocked', fleetSeries('blocked'), c.blocked ? 'Needs attention' : 'Nothing stuck'),
-      tile('in-progress', 'In progress', c.inProgress, 'ok', '#/list/in-progress', fleetSeries('inProgress'), 'Under way'),
-      tile('reviews', 'Waiting on review', c.reviews, c.reviews ? 'warn' : 'ok', '#/list/reviews', fleetSeries('reviews'), c.reviews ? 'Ready for you' : 'Nothing to review'),
-      tile('queued', 'Queued', c.queued, 'quiet', '#/list/queued', fleetSeries('queued'), 'Not started yet'),
-      tile('done-today', 'Finished today', c.doneToday, c.doneToday ? 'ok' : 'quiet', '#/list/done-today', fleetSeries('doneToday'), c.doneToday ? 'Landed today' : 'None yet today'),
-      tile('load', 'Machine load', loadPerCore == null ? null : `${Math.round(loadPerCore * 100)}%`,
-        loadPerCore > (limits.loadPerCore ?? 2) ? 'alert' : loadPerCore > 1 ? 'warn' : 'ok', '#/machine',
-        history.machine.map((p) => (p.load != null && p.cores ? p.load / p.cores : null)),
-        loadPerCore > (limits.loadPerCore ?? 2) ? 'Overloaded' : loadPerCore > 1 ? 'Busy' : 'Of all cores'),
+      column('decide', 'Needs your decision', false, ['Waiting on you', 'Nothing waiting']),
+      column('aging', 'Aging decisions', true, ['Waiting 3 days or more', 'None overdue']),
+      column('blocked', 'Blocked', true, ['Stuck on something', 'Nothing stuck']),
+      tile('working', 'Working', c.working, 'ok', '#/board/working', series('working'), 'Under way'),
+      column('review', 'Waiting on review', false, ['Ready for your review', 'Nothing to review']),
+      column('land', 'Ready to land', false, ['Ready for your merge call', 'Nothing to merge']),
+      tile('done-today', 'Finished today', c.doneToday, c.doneToday ? 'ok' : 'quiet', '#/list/done-today', series('doneToday'), c.doneToday ? 'Landed today' : 'None yet today'),
+      tile('load', 'Machine load', loadPerCore == null ? null : `${Math.round(loadPerCore * 100)}%`, isOverloaded ? 'alert' : loadPerCore > 1 ? 'warn' : 'ok', '#/machine',
+        history.machine.map((p) => (p.load != null && p.cores ? p.load / p.cores : null)), isOverloaded ? 'Overloaded' : loadPerCore > 1 ? 'Busy' : 'Of all cores'),
       tile('sessions', 'Claude sessions', machine?.sessions, machine?.sessions > (limits.claudeSessions ?? Infinity) ? 'alert' : 'ok', '#/machine',
-        machineSeries('sessions'), machine?.sessions > (limits.claudeSessions ?? Infinity) ? 'Too many running' : 'Running now'),
-      tile('orphans', 'Stray helpers', machine?.orphans, machine?.orphans ? 'warn' : 'ok', '#/machine', machineSeries('orphans'),
+        history.machine.map((p) => p.sessions), machine?.sessions > (limits.claudeSessions ?? Infinity) ? 'Too many running' : 'Running now'),
+      tile('orphans', 'Stray helpers', machine?.orphans, machine?.orphans ? 'warn' : 'ok', '#/machine', history.machine.map((p) => p.orphans),
         machine?.orphans ? 'Parent has exited' : 'None left behind'),
     ];
   };
 
   return {
-    SCHEMA, BUCKETS, AGE_BUCKETS, assertSchema, fleetOverview, decisionsInbox, taskDetail, board, freshnessBanner, resourcesView,
-    bucketOf, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis, duration, localDate,
+    SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
+    cards, workColumn, boardView, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    duration, localDate,
   };
 });

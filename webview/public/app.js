@@ -10,29 +10,32 @@
   const dialog = document.getElementById('detail');
   const detailBody = document.getElementById('detail-body');
   let snapshot = null;
+  let allCards = [];
   let resources = null;
   let resourcesLine = '';
   let history = { fleet: [], machine: [] };
   let charts = [];
+  const filters = { query: '', project: '' };
 
   const el = (tag, props = {}, ...children) => {
     const node = document.createElement(tag);
     Object.entries(props).forEach(([k, v]) => {
       if (v == null) return;
       if (k === 'key') node.dataset.key = v;
+      else if (k === 'aria') Object.entries(v).forEach(([a, val]) => node.setAttribute(`aria-${a}`, val));
       else node[k] = v;
     });
-    children.flat().forEach((c) => c != null && c !== '' && node.append(c instanceof Node ? c : document.createTextNode(String(c))));
+    children.flat(Infinity).forEach((c) => c != null && c !== '' && c !== false && node.append(c instanceof Node ? c : document.createTextNode(String(c))));
     return node;
   };
   const text = (tag, value, props) => el(tag, { ...props, textContent: value ?? '' });
-  const safeLink = (url) => (/^https?:\/\//i.test(url ?? '')
-    ? el('a', { href: url, textContent: url.replace(/^https?:\/\//, ''), rel: 'noreferrer noopener', target: '_blank', className: 'url' })
-    : document.createTextNode(url ?? ''));
+  const isWebUrl = (url) => /^https?:\/\//i.test(url ?? '');
+  const external = (url, label, className) => el('a', { href: url, textContent: label, rel: 'noreferrer noopener', target: '_blank', className });
   const empty = (message) => text('p', message, { className: 'muted empty' });
-  const dot = (bucket) => el('span', { className: `dot fill-${bucket}`, ariaHidden: 'true' });
+  const swatch = (group) => el('span', { className: `dot fill-${group}`, aria: { hidden: 'true' } });
   const ago = (seconds) => (seconds == null ? '' : `${R.duration(seconds)} ago`);
-  const KIND = { ship: 'Change with a PR', scout: 'Investigation', secondmate: 'Second mate' };
+  const groupOf = (column) => R.COLUMNS.find((c) => c.key === column)?.group ?? 'done';
+  const cardHref = (c) => `#/card/${encodeURIComponent(c.key)}`;
 
   // Charts draw at their container's measured width, after insertion and on resize.
   const chart = (className, draw) => {
@@ -49,20 +52,116 @@
     text('summary', 'Show the numbers'),
     el('table', {}, el('thead', {}, el('tr', {}, headers.map((h) => text('th', h)))),
       el('tbody', {}, rows.map((r) => el('tr', {}, r.map((v) => text('td', v)))))));
-  const card = (title, subtitle, ...body) => el('section', { className: 'card' }, text('h3', title), subtitle ? text('p', subtitle, { className: 'subtitle' }) : '', ...body);
+  const panel = (title, subtitle, ...body) => el('section', { className: 'panel' }, text('h3', title), subtitle ? text('p', subtitle, { className: 'subtitle' }) : '', ...body);
 
-  // ---- overview ----
-  const legend = (segments) => el('ul', { className: 'legend' }, segments.map((g) => el('li', {},
-    el('a', { href: g.href, key: `legend:${g.key}` }, el('span', { className: `swatch fill-${g.key}`, ariaHidden: 'true' }), text('span', g.label), text('strong', String(g.count))))));
+  // ---- KPI strip ----
+  const kpiStrip = () => el('div', { className: 'kpis' }, R.kpis({
+    counts: R.fleetCounts(snapshot), machine: resources && R.machineSample(resources), limits: resources?.limits, history,
+  }).map((t) => el('a', { href: t.href, className: `kpi tone-${t.tone}`, key: `tile:${t.key}` },
+    text('span', t.label, { className: 'kpi-label' }),
+    el('span', { className: 'kpi-body' }, text('span', t.value, { className: 'kpi-value' }), C.sparkline(t.series, { width: 64, height: 24 })),
+    text('span', t.note, { className: 'kpi-note' }))));
 
-  // Work tiles and machine tiles sit in separate rows so each row fills the width.
-  const tiles = (counts) => {
-    const all = R.kpis({ counts, machine: resources && R.machineSample(resources), limits: resources?.limits, history }).map((t, i) => el('a', { href: t.href, className: `tile tone-${t.tone}`, key: `tile:${t.key}` },
-      text('span', t.label, { className: 'tile-label' }),
-      el('span', { className: 'tile-body' }, text('span', t.value, { className: 'tile-value' }), C.sparkline(t.series, { width: i < 6 ? 72 : 144, height: 28 })),
-      text('span', t.note, { className: 'tile-note' })));
-    return [el('div', { className: 'tiles' }, all.slice(0, 6)), el('div', { className: 'tiles tiles-machine' }, all.slice(6))];
+  // ---- cards ----
+  // The card's PR badge already links the PR, so bare URLs are dropped from the one-line summary.
+  const snippet = (c) => {
+    const line = (c.decisions[0]?.summary ?? c.blockers.events[0]?.summary
+      ?? (c.blockers.ids.length ? `Waiting on ${c.blockers.ids.join(', ')}` : c.stateDetail) ?? '').replace(/https?:\/\/\S+/g, '').trim();
+    return line.length > 3 ? line : '';
   };
+  const cardNode = (c) => el('article', { className: `card tone-${groupOf(c.column)}` },
+    el('a', { href: cardHref(c), className: 'card-link', key: `card:${c.key}`, textContent: c.title }),
+    snippet(c) && snippet(c) !== c.title ? text('p', snippet(c), { className: 'card-snippet' }) : '',
+    el('div', { className: 'card-meta' },
+      text('span', R.projectName(c.project), { className: 'chip' }),
+      c.ageSeconds != null ? text('span', R.duration(c.ageSeconds), { className: `age${c.column === 'aging' ? ' age-old' : ''}`, title: `Last update ${ago(c.ageSeconds)}` }) : '',
+      c.date ? text('span', c.date, { className: 'age' }) : '',
+      c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, R.prNumber(c.prUrl) ? `PR ${R.prNumber(c.prUrl)}` : 'PR', 'pr-badge') : '',
+      c.badges.map((b) => text('span', b, { className: 'badge' }))));
+
+  // ---- board ----
+  let baseHash = '#/board';
+  const boardNode = el('div', { className: 'board', aria: { label: 'Work board' } });
+  const kpiSlot = el('div', {});
+  let renderBoardColumns = () => {};
+
+  // The toolbar is built once and never replaced, so typing keeps its focus and caret.
+  const toolbar = (() => {
+    const search = el('input', { type: 'search', placeholder: 'Search tasks', className: 'search', key: 'search', aria: { label: 'Search tasks' } });
+    const project = el('select', { className: 'project-filter', key: 'project', aria: { label: 'Filter by project' } });
+    const status = el('span', { className: 'muted filter-status', aria: { live: 'polite' } });
+    const sync = () => {
+      const params = new URLSearchParams();
+      if (filters.query) params.set('q', filters.query);
+      if (filters.project) params.set('project', filters.project);
+      window.history.replaceState(null, '', `#/board${params.size ? `?${params}` : ''}`);
+      baseHash = location.hash;
+      renderBoardColumns();
+    };
+    search.addEventListener('input', () => { filters.query = search.value; sync(); });
+    project.addEventListener('change', () => { filters.project = project.value; sync(); });
+    const node = el('div', { className: 'toolbar' }, search, project, status,
+      text('span', 'Press / to search, arrow keys to move between cards, Enter to open.', { className: 'muted hint' }));
+    return {
+      node, status,
+      update: () => {
+        if (search.value !== filters.query) search.value = filters.query;
+        const options = [['', 'All projects'], ...R.projects(allCards).map((p) => [p.value, p.label])];
+        if (filters.project && !options.some(([v]) => v === filters.project)) options.push([filters.project, R.projectName(filters.project)]);
+        project.replaceChildren(...options.map(([value, label]) => el('option', { value, textContent: label })));
+        project.value = filters.project;
+      },
+      focus: () => search.focus(),
+    };
+  })();
+
+  renderBoardColumns = () => {
+    const columns = R.boardView(allCards, filters);
+    const shown = columns.reduce((n, c) => n + c.cards.length, 0);
+    const total = columns.reduce((n, c) => n + c.total, 0);
+    toolbar.status.textContent = filters.query || filters.project ? `Showing ${shown} of ${total}` : '';
+    const focusKey = document.activeElement?.dataset?.key;
+    boardNode.replaceChildren(...columns.map((col) => el('section', { className: `column tone-${col.group}`, id: `col-${col.key}`, aria: { labelledby: `col-${col.key}-title` } },
+      el('h2', { className: 'column-head', id: `col-${col.key}-title`, tabIndex: -1 }, swatch(col.group), text('span', col.label),
+        text('span', col.cards.length === col.total ? String(col.total) : `${col.cards.length} of ${col.total}`, { className: 'count' })),
+      col.cards.length ? el('div', { className: 'column-cards' }, col.cards.map(cardNode))
+        : empty(col.total ? 'No matches.' : 'Nothing here.'))));
+    if (focusKey && !dialog.open) boardNode.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
+  };
+
+  // Arrow keys walk the board like a grid: up and down within a column, left and right across.
+  boardNode.addEventListener('keydown', (e) => {
+    const link = e.target.closest?.('.card-link');
+    if (!link || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    const columns = [...boardNode.querySelectorAll('.column')].map((col) => [...col.querySelectorAll('.card-link')]);
+    const x = columns.findIndex((links) => links.includes(link));
+    const y = columns[x].indexOf(link);
+    let target = e.key === 'ArrowUp' ? columns[x][y - 1] : e.key === 'ArrowDown' ? columns[x][y + 1] : null;
+    const step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+    for (let i = x + step; step && i >= 0 && i < columns.length && !target; i += step) target = columns[i][Math.min(y, columns[i].length - 1)];
+    if (target) { e.preventDefault(); target.focus(); target.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || dialog.open || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || !view.contains(boardNode)) return;
+    e.preventDefault();
+    toolbar.focus();
+  });
+
+  const renderBoard = (columnKey) => {
+    toolbar.update();
+    kpiSlot.replaceChildren(kpiStrip());
+    if (!view.contains(boardNode)) view.replaceChildren(kpiSlot, toolbar.node, boardNode);
+    renderBoardColumns();
+    if (columnKey) {
+      const col = document.getElementById(`col-${columnKey}`);
+      col?.scrollIntoView({ block: 'nearest', inline: 'center' });
+      col?.querySelector('.column-head')?.focus({ preventScroll: true });
+    }
+  };
+
+  // ---- charts page ----
+  const legend = (segments) => el('ul', { className: 'legend' }, segments.map((g) => el('li', {},
+    el('a', { href: g.href, key: `legend:${g.key}` }, el('span', { className: `swatch fill-${g.key}`, aria: { hidden: 'true' } }), text('span', g.label), text('strong', String(g.count))))));
 
   const machineTrends = () => {
     const series = (key, scale = 1) => history.machine.map((p) => ({ t: p.t, v: p[key] == null ? null : p[key] * scale }));
@@ -75,7 +174,7 @@
       ['MCP helper processes', series('helpers'), { format: whole, isInteger: true }],
     ];
     const minutes = Math.round((history.machine.length > 1 ? history.machine[history.machine.length - 1].t - history.machine[0].t : 0) / 60000);
-    return card('Machine trends', `Last ${minutes ? `${minutes} min` : 'few seconds'} while this page's server has been running, up to 3 hours.`,
+    return panel('Machine trends', `Last ${minutes ? `${minutes} min` : 'few seconds'} while this page's server has been running, up to 3 hours.`,
       el('div', { className: 'multiples' }, specs.map(([title, points, opts]) => el('figure', {},
         text('figcaption', title), chart('trend', (width) => C.lineChart(points, { width, title, ...opts }))))),
       numbersTable(['Time', ...specs.map(([t]) => t)], history.machine.slice(-12).reverse().map((p) => [
@@ -83,134 +182,154 @@
         p.sessions == null ? 'n/a' : String(Math.round(p.sessions)), p.helpers == null ? 'n/a' : String(Math.round(p.helpers))])));
   };
 
-  const itemTable = (items) => el('table', { className: 'items' },
-    el('thead', {}, el('tr', {}, ['Status', 'Item', 'Project', 'Last update', 'Link'].map((h) => text('th', h)))),
-    el('tbody', {}, items.map((i) => el('tr', {},
-      el('td', { className: 'status' }, i.bucket ? dot(i.bucket) : '', text('span', i.label)),
-      el('td', {},
-        i.taskId ? el('a', { href: `#/task/${encodeURIComponent(i.taskId)}`, textContent: i.title, key: `task:${i.taskId}` }) : text('span', i.title),
-        i.detail ? text('div', i.detail, { className: 'muted' }) : '',
-        i.waitsOn.map((w) => text('div', w, { className: 'muted' }))),
-      text('td', i.project), text('td', ago(i.ageSeconds), { className: 'num' }), el('td', {}, safeLink(i.prUrl))))));
-
-  const renderOverview = () => {
-    const counts = R.fleetCounts(snapshot);
+  const renderCharts = () => {
     const breakdown = R.stateBreakdown(snapshot);
     const projects = R.projectBars(snapshot);
     const ages = R.ageHistogram(snapshot);
-    const needs = R.listView(snapshot, 'needs');
     const total = breakdown.reduce((n, b) => n + b.count, 0);
     return [
-      el('section', { className: 'hero' },
-        el('h2', { className: 'hero-line' },
-          counts.needsYou ? [text('span', String(counts.needsYou), { className: 'hero-number' }), text('span', counts.needsYou === 1 ? ' item needs you' : ' items need you')]
-            : text('span', 'Nothing needs you right now')),
-        counts.needsYou ? el('p', { className: 'hero-sub' },
-          el('a', { href: '#/list/needs-decision', textContent: `${counts.needsDecision} decision${counts.needsDecision === 1 ? '' : 's'}`, key: 'hero:decisions' }), ' and ',
-          el('a', { href: '#/list/reviews', textContent: `${counts.reviews} review${counts.reviews === 1 ? '' : 's'}`, key: 'hero:reviews' }), ' waiting.') : '',
-        el('div', { className: 'strip' },
-          text('p', `${total} task${total === 1 ? '' : 's'} by state`, { className: 'strip-title' }),
-          chart('strip-chart', (width) => C.stateStrip(breakdown, width)),
-          legend(breakdown))),
-      ...tiles(counts),
+      text('h2', 'Charts', { className: 'page-title' }),
+      panel('Everything on the board', `${total} cards by state. Select a segment to list them.`,
+        chart('strip-chart', (width) => C.stateStrip(breakdown, width)), legend(breakdown)),
       el('div', { className: 'grid-2' },
-        card('Work by project', 'Tasks per project, coloured by state. Select a project to see its work.',
-          projects.length ? chart('bars', (width) => C.projectChart(projects, width)) : empty('No work in flight.'),
-          numbersTable(['Project', 'Tasks', ...R.BUCKETS.map((b) => b.label)], projects.map((p) => [p.project, String(p.total), ...p.segments.map((g) => String(g.count))]))),
-        card('How long items have waited', `Decisions, reviews, and blocked work by time since their last update.${ages.unknownAge ? ` ${ages.unknownAge} without a known age are left out.` : ''}`,
+        panel('Open work by project', 'Cards per project, coloured by state. Select a project to filter the board.',
+          projects.length ? chart('bars', (width) => C.projectChart(projects, width)) : empty('No open work.'),
+          numbersTable(['Project', 'Cards', ...R.GROUPS.filter((g) => g.key !== 'done').map((g) => g.label)], projects.map((p) => [p.project, String(p.total), ...p.segments.map((g) => String(g.count))]))),
+        panel('How long items have waited', `Decisions, blocked work, and PRs by time since their last update.${ages.unknownAge ? ` ${ages.unknownAge} item${ages.unknownAge === 1 ? ' has' : 's have'} no known age and ${ages.unknownAge === 1 ? 'is' : 'are'} left out.` : ''}`,
           chart('columns', (width) => C.columnChart(ages.bins, width)),
           numbersTable(['Waiting', 'Items'], ages.bins.map((b) => [b.label, String(b.count)])))),
       machineTrends(),
-      el('section', { className: 'card' },
-        el('div', { className: 'card-head' }, text('h3', 'Needs you'), needs.items.length > 8 ? el('a', { href: '#/list/needs', textContent: `See all ${needs.items.length}`, key: 'needs:all' }) : ''),
-        needs.items.length ? itemTable(needs.items.slice(0, 8)) : empty('Nothing is waiting on you.')),
-      el('p', { className: 'more' }, el('a', { href: '#/list/finished', textContent: 'Recently finished work', key: 'more:finished' })),
     ];
   };
 
-  const backLink = () => el('p', { className: 'back' }, el('a', { href: '#/', textContent: 'Back to the overview', key: 'back' }));
+  const backLink = () => el('p', { className: 'back' }, el('a', { href: '#/board', textContent: 'Back to the board', key: 'back' }));
 
   const renderList = (filter) => {
     const list = R.listView(snapshot, filter);
-    if (!list) return [backLink(), text('h2', 'Nothing to show for this link')];
-    return [backLink(), text('h2', `${list.title} (${list.items.length})`),
-      list.items.length ? el('section', { className: 'card' }, itemTable(list.items)) : empty('Nothing here right now.')];
+    if (!list) return [backLink(), text('h2', 'Nothing to show for this link', { className: 'page-title' })];
+    return [backLink(), text('h2', `${list.title} (${list.cards.length})`, { className: 'page-title' }),
+      list.cards.length ? el('div', { className: 'card-grid' }, list.cards.map(cardNode)) : empty('Nothing here right now.')];
   };
 
   const renderMachine = () => {
-    if (!resources) return [backLink(), text('h2', 'Machine'), empty('Checking the machine…')];
+    if (!resources) return [text('h2', 'Machine', { className: 'page-title' }), empty('Checking the machine…')];
     const v = R.resourcesView(resources);
     const plain = (headers, rows) => el('table', {}, el('thead', {}, el('tr', {}, headers.map((h) => text('th', h)))),
       el('tbody', {}, rows.map((r) => el('tr', {}, r.map(([value, cls]) => text('td', value, { className: cls }))))));
-    return [backLink(), text('h2', 'Machine'), text('p', resourcesLine, { className: 'muted' }),
-      el('section', { className: 'card' }, el('table', {}, v.machine.map(([k, val]) => el('tr', {}, text('th', k), text('td', val, { className: 'num' }))))),
+    return [text('h2', 'Machine', { className: 'page-title' }), text('p', resourcesLine, { className: 'muted' }),
+      el('section', { className: 'panel' }, el('table', {}, v.machine.map(([k, val]) => el('tr', {}, text('th', k), text('td', val, { className: 'num' }))))),
       machineTrends(),
-      card(`Claude sessions (${v.sessions.length})`, 'Largest first, including their helper processes.',
+      panel(`Claude sessions (${v.sessions.length})`, 'Largest first, including their helper processes.',
         v.sessions.length ? plain(['Session', 'Memory', 'Processes', 'MCP helpers', 'Age'], v.sessions.map((x) => [[x.name], [x.memory, 'num'], [x.processes, 'num'], [x.mcpHelpers, 'num'], [x.age, 'num']])) : empty('No Claude sessions.')),
-      card(`Stray helpers (${v.orphans.length})`, 'Helper processes older than an hour whose parent has exited.',
+      panel(`Stray helpers (${v.orphans.length})`, 'Helper processes older than an hour whose parent has exited.',
         v.orphans.length ? plain(['PID', 'Command', 'Memory', 'Age'], v.orphans.map((o) => [[o.pid, 'num'], [o.command, 'command'], [o.memory, 'num'], [o.age, 'num']])) : empty('None.'))];
   };
 
-  // ---- task detail panel ----
-  const renderDetail = (id, detail) => {
-    const t = R.taskDetail(snapshot, id, detail);
-    if (!t) return [text('h2', 'This task is no longer in the fleet', { id: 'detail-title' })];
+  // ---- detail drawer ----
+  const copyText = async (value) => {
+    try { await navigator.clipboard.writeText(value); return true; } catch { /* fall back below */ }
+    const area = el('textarea', { value, readOnly: true, className: 'offscreen' });
+    document.body.append(area);
+    area.select();
+    const isCopied = document.execCommand('copy');
+    area.remove();
+    return isCopied;
+  };
+  const copyRow = (step, i) => {
+    const note = el('span', { className: 'copy-note', aria: { live: 'polite' } });
+    return el('div', { className: 'resolve-step' },
+      text('div', step.label, { className: 'resolve-label' }),
+      el('div', { className: 'resolve-line' }, text('code', step.text),
+        el('button', { type: 'button', className: 'copy', textContent: 'Copy', key: `copy:${i}`, aria: { label: `Copy: ${step.label}` },
+          onclick: async () => { note.textContent = (await copyText(step.text)) ? 'Copied' : 'Copy failed; select the text instead'; } })),
+      note);
+  };
+  const blockerLink = (id) => {
+    const target = allCards.find((c) => c.id === id && c.column !== 'done');
+    return target ? el('a', { href: cardHref(target), textContent: id }) : text('span', id);
+  };
+  const closeButton = () => el('button', { type: 'button', className: 'close', textContent: 'Close', key: 'close', onclick: () => dialog.close() });
+
+  const renderDetail = (key, detail) => {
+    const c = allCards.find((x) => x.key === key);
+    if (!c) return [el('div', { className: 'detail-head' }, text('h2', 'This item is no longer on the board', { id: 'detail-title' }), closeButton())];
+    const column = R.COLUMNS.find((x) => x.key === c.column);
+    const t = c.taskId ? R.taskDetail(snapshot, c.taskId, detail) : null;
     const row = (k, ...v) => el('div', {}, text('dt', k), el('dd', {}, ...v));
+    const block = (title, ...body) => el('section', { className: 'detail-block' }, text('h3', title), ...body);
     return [
       el('div', { className: 'detail-head' },
-        el('div', {}, text('h2', t.title ?? t.id, { id: 'detail-title' }), text('p', [t.id, t.project].filter(Boolean).join(' in '), { className: 'muted' })),
-        el('button', { type: 'button', className: 'close', textContent: 'Close', key: 'close', onclick: () => dialog.close() })),
-      el('p', { className: 'status' }, dot(R.bucketOf(R.fleetOverview(snapshot).tasks.find((x) => x.id === id))), text('strong', t.statusLabel), t.stateDetail ? text('span', ` ${t.stateDetail}`, { className: 'muted' }) : ''),
+        el('div', {}, text('h2', c.title, { id: 'detail-title' }),
+          el('p', { className: 'detail-meta' }, text('span', R.projectName(c.project), { className: 'chip' }), text('span', c.id, { className: 'muted' }))),
+        closeButton()),
+      el('p', { className: 'status' }, swatch(groupOf(c.column)), text('strong', column?.label ?? 'Queued'), c.badges.map((b) => text('span', b, { className: 'badge' }))),
+      c.decisions.length ? block(c.decisions.length === 1 ? 'The decision' : `${c.decisions.length} decisions`,
+        c.decisions.map((d) => el('div', { className: 'decision' }, text('p', d.summary), d.reason ? text('p', d.reason, { className: 'muted' }) : '',
+          d.until ? text('p', `Held until ${d.until}`, { className: 'muted' }) : ''))) : '',
+      c.blockers.events.length || c.blockers.ids.length || c.blockers.reason ? block('Blocked by',
+        c.blockers.events.map((b) => text('p', b.summary)),
+        c.blockers.ids.length ? el('p', {}, 'Waiting on ', c.blockers.ids.map((id, i) => [i ? ', ' : '', blockerLink(id)])) : '',
+        c.blockers.reason ? text('p', c.blockers.reason, { className: 'muted' }) : '') : '',
+      c.resolve.length ? el('section', { className: 'detail-block resolve' }, text('h3', 'How to resolve it'),
+        text('p', 'Nothing runs from this page. Copy a reply for firstmate, or the command it would run.', { className: 'muted' }),
+        c.resolve.map(copyRow)) : '',
       el('dl', {},
-        row('What it is', KIND[t.kind] ?? t.kind ?? 'Unknown'),
-        row('Started', t.since ?? 'Unknown'),
-        row('Last update', t.ageSeconds == null ? 'Unknown' : ago(t.ageSeconds)),
-        row('Pull request', t.prUrl ? safeLink(t.prUrl) : 'None yet'),
-        row('Waiting on', t.waitsOn.length ? t.waitsOn.map((w) => text('div', w)) : 'Nothing')),
-      text('h3', 'Update history'),
-      text('p', 'Past updates, oldest first. These are a record, not the current status above.', { className: 'muted' }),
-      t.statusHistory.length ? text('pre', t.statusHistory.join('\n')) : empty(detail ? 'No updates recorded.' : 'Loading…'),
-      text('h3', `Instructions sent (${t.inbox.pending.length} unread, ${t.inbox.handled.length} read)`),
-      ...[['Unread', t.inbox.pending], ['Read', t.inbox.handled]].filter(([, m]) => m.length).map(([name, msgs]) => el('details', { key: `inbox:${name}` },
-        text('summary', `${name} (${msgs.length})`), ...msgs.map((m) => el('div', {}, text('strong', m.name), text('pre', m.text))))),
-    ];
+        c.stateDetail ? row('Latest status', c.stateDetail) : '',
+        c.ageSeconds != null ? row('Last update', ago(c.ageSeconds)) : '',
+        c.since ? row('Started', c.since) : '',
+        c.date ? row('Finished', c.date) : '',
+        row('Pull request', c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, c.prUrl, 'url') : 'None')),
+      c.text.length ? block('Full text', c.text.map((line) => text('pre', line))) : '',
+      t ? [text('h3', 'Update history'),
+        text('p', 'Past updates, oldest first. These are a record, not the current status above.', { className: 'muted' }),
+        t.statusHistory.length ? text('pre', t.statusHistory.join('\n')) : empty(detail ? 'No updates recorded.' : 'Loading…'),
+        text('h3', `Instructions sent (${t.inbox.pending.length} unread, ${t.inbox.handled.length} read)`),
+        [['Unread', t.inbox.pending], ['Read', t.inbox.handled]].filter(([, m]) => m.length).map(([name, msgs]) => el('details', { key: `inbox:${name}` },
+          text('summary', `${name} (${msgs.length})`), msgs.map((m) => el('div', {}, text('strong', m.name), text('pre', m.text)))))] : '',
+    ].flat(Infinity).filter(Boolean);
   };
 
   // ---- routing ----
-  const route = () => {
-    const [, page, ...rest] = location.hash.slice(1).split('/');
-    if (page === 'task' && rest[0]) return { page, id: decodeURIComponent(rest[0]) };
+  const route = (hash = location.hash) => {
+    const [path, query = ''] = hash.slice(1).split('?');
+    const [, page, ...rest] = path.split('/');
+    if (page === 'card' && rest[0]) return { page: 'card', key: decodeURIComponent(rest.join('/')) };
+    if (page === 'task' && rest[0]) return { page: 'card', key: `task:${decodeURIComponent(rest[0])}` };
     if (page === 'list' && rest.length) return { page, filter: rest.join('/') };
-    if (page === 'machine') return { page };
-    return { page: 'overview' };
+    if (page === 'machine' || page === 'charts') return { page };
+    return { page: 'board', column: rest[0] ?? null, params: new URLSearchParams(query) };
   };
-  let baseHash = '#/';
 
   // Re-rendering keeps keyboard focus and opened tables on the element with the same key.
-  const renderBase = () => {
+  const renderBase = (isNavigation = false) => {
     if (!snapshot) return;
-    if (route().page !== 'task') baseHash = location.hash || '#/';
-    const [, page, ...rest] = baseHash.slice(1).split('/');
+    if (route().page !== 'card') baseHash = location.hash || '#/board';
+    const r = route(baseHash);
+    if (r.page === 'board') {
+      filters.query = r.params.get('q') ?? '';
+      filters.project = r.params.get('project') ?? '';
+    }
     const focusKey = document.activeElement?.dataset?.key;
     const openKeys = [...view.querySelectorAll('details[open]')].map((d) => d.dataset.key);
     try {
-      view.replaceChildren(...(page === 'list' ? renderList(rest.join('/')) : page === 'machine' ? renderMachine() : renderOverview()));
+      if (r.page === 'board') renderBoard(isNavigation ? r.column : null);
+      else view.replaceChildren(...[r.page === 'list' ? renderList(r.filter) : r.page === 'machine' ? renderMachine() : renderCharts()].flat());
       document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
     } catch (e) {
       return showBanner({ tone: 'error', text: e.message });
     }
     openKeys.forEach((k) => { const d = view.querySelector(`details[data-key="${CSS.escape(k ?? '')}"]`); if (d) d.open = true; });
-    if (focusKey && !dialog.open) view.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
+    if (focusKey && !dialog.open && !(isNavigation && r.column)) view.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
     drawCharts();
-    document.querySelectorAll('nav a').forEach((a) => a.setAttribute('aria-current', String(a.getAttribute('href') === (page === 'machine' ? '#/machine' : '#/'))));
+    document.querySelectorAll('nav a').forEach((a) => a.setAttribute('aria-current', String(a.getAttribute('href') === `#/${r.page}`)));
   };
 
-  // Same focus and opened-section preservation as the base view, inside the panel.
-  const fillDetail = (id, detail) => {
+  // Same focus and opened-section preservation as the base view, inside the drawer.
+  const fillDetail = (key, detail) => {
     const isFocusInside = dialog.contains(document.activeElement);
     const focusKey = document.activeElement?.dataset?.key;
     const openKeys = [...detailBody.querySelectorAll('details[open]')].map((d) => d.dataset.key);
-    detailBody.replaceChildren(...renderDetail(id, detail));
+    detailBody.replaceChildren(...renderDetail(key, detail));
     openKeys.forEach((k) => { const d = detailBody.querySelector(`details[data-key="${CSS.escape(k ?? '')}"]`); if (d) d.open = true; });
     if (isFocusInside) (detailBody.querySelector(`[data-key="${CSS.escape(focusKey ?? '')}"]`) ?? detailBody.querySelector('.close'))?.focus();
   };
@@ -218,22 +337,24 @@
   let detailFor = null;
   const syncDetail = async () => {
     const r = route();
-    if (r.page !== 'task') { if (dialog.open) dialog.close(); return; }
+    if (r.page !== 'card') { if (dialog.open) dialog.close(); return; }
     if (!snapshot) return;
-    if (detailFor?.id !== r.id) detailFor = { id: r.id, detail: null };
-    fillDetail(r.id, detailFor.detail);
+    if (detailFor?.key !== r.key) detailFor = { key: r.key, detail: null };
+    fillDetail(r.key, detailFor.detail);
     if (!dialog.open) { dialog.showModal(); detailBody.querySelector('.close')?.focus(); }
-    const [detail] = await getJson(`/api/task/${encodeURIComponent(r.id)}`).catch(() => [null]);
-    if (detail && detailFor?.id === r.id && route().id === r.id) {
+    const taskId = allCards.find((c) => c.key === r.key)?.taskId;
+    if (!taskId) return;
+    const [detail] = await getJson(`/api/task/${encodeURIComponent(taskId)}`).catch(() => [null]);
+    if (detail && detailFor?.key === r.key && route().key === r.key) {
       detailFor.detail = detail;
-      fillDetail(r.id, detail);
+      fillDetail(r.key, detail);
     }
   };
   dialog.addEventListener('close', () => {
-    const id = route().id;
+    const { key } = route();
     detailFor = null;
-    if (route().page === 'task') location.hash = baseHash;
-    requestAnimationFrame(() => view.querySelector(`[data-key="${CSS.escape(`task:${id}`)}"]`)?.focus());
+    if (route().page === 'card') location.hash = baseHash;
+    requestAnimationFrame(() => view.querySelector(`[data-key="${CSS.escape(`card:${key}`)}"]`)?.focus());
   });
   dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
 
@@ -266,9 +387,10 @@
       }));
       if (res.headers.get('X-Snapshot-Version') !== version) {
         snapshot = R.assertSchema(body);
+        allCards = R.cards(snapshot);
         version = res.headers.get('X-Snapshot-Version');
         renderBase();
-        if (route().page === 'task') syncDetail();
+        if (route().page === 'card') syncDetail();
       }
     } catch (e) {
       showBanner({ tone: 'error', text: snapshot ? `Lost contact with the web view server: ${e.message}` : e.message });
@@ -294,7 +416,13 @@
       health.textContent = v.badge.text;
       alertsBox.hidden = !v.alerts.length;
       alertsBox.replaceChildren(text('h2', 'Machine alerts'), el('ul', {}, v.alerts.map((a) => text('li', a))));
-      if (!dialog.open) renderBase();
+      if (!snapshot || dialog.open) return;
+      // On the board only the KPI strip depends on the machine, so the columns and search box stay put.
+      if (view.contains(boardNode)) {
+        const focusKey = document.activeElement?.dataset?.key;
+        kpiSlot.replaceChildren(kpiStrip());
+        if (focusKey?.startsWith('tile:')) kpiSlot.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
+      } else renderBase();
     } catch (e) {
       health.className = 'health health-error';
       health.textContent = `Machine check unavailable: ${e.message}`;
@@ -302,7 +430,7 @@
   };
 
   window.addEventListener('hashchange', () => {
-    if (route().page !== 'task') renderBase();
+    if (route().page !== 'card') renderBase(true);
     syncDetail();
   });
   let resizeFrame = 0;

@@ -67,7 +67,7 @@ test('server: snapshot proxy, task detail, and guards', async (t) => {
   const trend = JSON.parse((await get(port, '/api/history')).body);
   assert.equal(trend.windowMs, 3 * 3600_000);
   assert.deepEqual(Object.keys(trend.fleet[0]), ['t', ...Object.keys(R.fleetCounts(real))]);
-  assert.equal(trend.fleet[0].needsDecision, 2);
+  assert.deepEqual([trend.fleet[0].decide, trend.fleet[0].aging], [1, 1]);
   assert.deepEqual([trend.machine.length, trend.machine[0].sessions], [1, null], 'a partial reading samples as missing, not zero');
   assert.equal((await get(port, '/api/history', { method: 'POST' })).status, 405);
   for (const file of ['/charts.js', '/theme.js']) assert.equal((await get(port, file)).status, 200, file);
@@ -81,44 +81,24 @@ test('server: snapshot proxy, task detail, and guards', async (t) => {
   assert.match((await get(port, '/')).headers['content-security-policy'], /default-src 'self'/);
 });
 
-test('decisions inbox uses the snapshot buckets verbatim', () => {
-  const { items } = R.decisionsInbox(real);
-  const status = items.find((i) => i.source === 'status');
-  assert.equal(status.taskId, 'demo-task-1');
-  assert.equal(status.summary, `choose ${XSS}`, 'worker text stays raw; app.js renders it via textContent');
-  const hold = items.find((i) => i.source === 'hold');
-  assert.deepEqual([hold.id, hold.reason], ['demo-held', 'choose naming']);
+test('cards: a status decision, a captain hold, and finished work, with worker text kept raw', () => {
+  const all = R.cards(real);
+  const by = Object.fromEntries(all.map((c) => [c.key, c]));
+  const task = by['task:demo-task-1'];
+  assert.equal(task.column, 'aging', 'the fixture decision is years old');
+  assert.deepEqual(task.decisions.map((d) => [d.key, d.summary]), [['api-shape', `choose ${XSS}`]], 'worker text stays raw; app.js renders it via textContent');
+  assert.equal(task.prUrl, 'https://example.invalid/demo/pull/9');
+  assert.deepEqual(task.resolve.map((s) => s.text), [`For demo-task-1 (choose ${XSS}): <your answer>`, "bin/fm-send.sh fm-demo-task-1 --resolve-key api-shape '<your answer>'"]);
+  const hold = by['hold:demo-held'];
+  assert.deepEqual([hold.column, hold.decisions[0].summary, hold.badges], ['decide', 'choose naming', ['Your call']]);
+  const done = all.find((c) => c.source === 'finished');
+  assert.deepEqual([done.id, done.column, done.date, done.prUrl], ['demo-old', 'done', '2026-07-08', 'https://example.invalid/demo/pull/3']);
 });
 
-test('overview and detail view-models carry state, PR, and waiting-on', () => {
-  const [row] = R.fleetOverview(real).tasks;
-  assert.equal(row.prUrl, 'https://example.invalid/demo/pull/9');
-  assert.ok(row.needsCaptain);
-  assert.ok(row.waitsOn.some((w) => w.startsWith('needs-decision:')));
+test('task detail carries the status history and inbox for known tasks only', () => {
   const detail = R.taskDetail(real, 'demo-task-1', { status_history: ['a'], inbox: { pending: [], handled: [] } });
   assert.deepEqual(detail.statusHistory, ['a']);
   assert.equal(R.taskDetail(real, 'missing'), null);
-});
-
-test('board: needs-the-captain, in flight by project, recently finished', () => {
-  const { needsCaptain, inFlight, finished } = R.board(real);
-  assert.deepEqual(needsCaptain.map((a) => [a.label, a.taskId, a.title]), [
-    ['Needs a decision', 'demo-task-1', `choose ${XSS}`],
-    ['Your call', null, 'Pick a name'],
-  ]);
-  assert.deepEqual(inFlight.map((g) => [g.project, g.tasks.map((t) => t.id)]), [['demo', ['demo-task-1']]]);
-  assert.deepEqual(finished.map((f) => [f.id, f.verb, f.date, f.url]), [['demo-old', 'done', '2026-07-08', 'https://example.invalid/demo/pull/3']]);
-});
-
-test('board: a done task with an open PR is review-ready; a merged one is not', () => {
-  const withTask = (detail) => ({
-    ...real,
-    tasks: [{ ...real.tasks[0], hints: {}, current_state: { state: 'done', detail } }],
-    backlog: { records: [] },
-  });
-  const [ready] = R.board(withTask('run passed: PR open')).needsCaptain;
-  assert.deepEqual([ready.label, ready.prUrl], ['PR ready for review', 'https://example.invalid/demo/pull/9']);
-  assert.equal(R.board(withTask('run passed: PR merged')).needsCaptain.length, 0);
 });
 
 test('freshness banner never replaces data with an error', () => {
@@ -134,8 +114,8 @@ test('freshness banner never replaces data with an error', () => {
 });
 
 test('client refuses a foreign snapshot schema', () => {
-  assert.throws(() => R.fleetOverview({ schema: 'fm-fleet-snapshot.v2' }), /Unsupported snapshot schema/);
-  assert.throws(() => R.decisionsInbox({}), /Unsupported snapshot schema/);
+  assert.throws(() => R.cards({ schema: 'fm-fleet-snapshot.v2' }), /Unsupported snapshot schema/);
+  assert.throws(() => R.taskDetail({}, 'demo-task-1'), /Unsupported snapshot schema/);
 });
 
 test('client code never uses HTML-injecting sinks', () => {

@@ -3,10 +3,23 @@
 A read-only, localhost-only dashboard over the fleet and the machine it runs on.
 It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders it.
 
-- The overview leads with how many items need the captain, a state strip of every task, a row of headline tiles (needs your decision, blocked, in progress, waiting on review, queued, finished today, machine load, Claude sessions, stray helpers) with sparklines, and charts for work by project, how long waiting items have sat, and machine trends.
-- Every tile, strip segment, legend entry, project bar, and age column opens a filtered list, and every task in a list opens a detail panel with its status, PR, what it is waiting on, its age, its update history, and the instructions sent to it; Esc closes the panel and returns focus to the task link.
-- The Machine page holds the resources panel: machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
+- The Board is the main view: a KPI strip with sparklines above a kanban of seven columns (Needs your decision, Aging decisions, Blocked, Working, Waiting on review, Ready to land, Done (recent)), with search, a project filter, and column counts.
+- Each card shows its title, project, age, PR badge (a deep link to the PR), and status colour; selecting it opens a detail drawer with the full decision or blocker text, what it is waiting on, the PR, the update history, the instructions sent, and how to resolve it: the reply to give firstmate and the command firstmate would run, each with a Copy button.
+- The keyboard works throughout: `/` focuses search, arrow keys move between cards, Enter opens a card, and Esc closes the drawer and returns focus to the card.
+- The Charts page shows every card by state, open work by project, how long waiting items have sat, and machine trends; the Machine page holds machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
 - Light and dark themes follow the operating system by default; the header toggle cycles system, light, and dark and remembers the choice in `localStorage`.
+- The page only reads: it never answers a decision, holds, merges, or sends anything.
+
+## Board columns
+
+`cards()` in `public/render.js` classifies from structured snapshot fields only, never by matching free text (the one exception is `bin/fm-crew-state.sh`'s fixed `PR merged` / `PR closed` detail vocabulary):
+
+- A task with an open `needs-decision` record, a live captain hold (`hold_bucket == "live"`), or a second mate's `decisions_open` entry is a decision; it goes to Needs your decision when its age is under 3 days and to Aging decisions, oldest first, after that.
+- Decision age is the time since the task's last status event, or since `hold_set` for a hold (`hold_age_days` when `hold_set` is missing).
+- Blocked holds tasks with an open `blocked` record, a `blocked` or `failed` current state, or unresolved backlog blockers, plus queued rows waiting on unfinished work; blocked records are never shown as decisions.
+- A `done` task with an open PR goes to Ready to land when it ran the no-mistakes pipeline (its review is done and it awaits the merge call) and to Waiting on review when it is a direct PR; a merged or closed PR goes to Done.
+- A paused task or one with no live status that has a PR goes to Waiting on review; a `done` local-only task goes to Ready to land; a finished investigation goes to Waiting on review.
+- Everything else in flight is Working, with a badge for paused, parked, or no live status; Done (recent) lists the latest 15 backlog Done rows and second-mate landings.
 
 ## Run
 
@@ -40,10 +53,10 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 ## Charts and history
 
 - All charts are hand-written inline SVG in `public/charts.js`, with no chart library, font, or network fetch; each chart has a "Show the numbers" table and a hover or keyboard-focus readout.
-- State colours are one fixed, ordered set per theme (needs you, blocked, waiting, working, done, status unknown) checked for colour-vision separation and 3:1 contrast against the card surface; text never takes a state colour, and every coloured mark sits beside a text label.
+- State colours are one fixed, ordered set per theme (decisions, blocked, waiting on review, working, ready to land, done) checked for colour-vision separation and 3:1 contrast against the card surface; text never takes a state colour, and every coloured mark sits beside a text label.
 - The server keeps trend history in memory only while it runs: one sample per resources reading and one per new snapshot, at most 3 hours, served downsampled to at most 360 points by `GET /api/history`.
   A restart starts the trends empty; nothing is written to disk.
-- `public/render.js` shapes every count, bucket, and list; the server reuses the same functions to sample the headline counts, so the tiles and their sparklines agree.
+- `public/render.js` shapes every card, count, and list; the server reuses the same functions to sample the headline counts, so the tiles and their sparklines agree.
 
 ## Design
 
@@ -51,7 +64,8 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 - `GET /api/resources` serves the latest resources reading with the same headers under the `X-Resources-` prefix.
 - `GET /api/history` returns `{windowMs, fleet, machine}`: timestamped samples of the headline counts and of machine load, memory in use, Claude sessions, MCP helpers, and stray helpers, with `null` for a reading that was not available.
 - `GET /api/task/<id>` adds the status-log tail (shown as history, never as current state) and the task's inbox listing. `<id>` must be a task in the current snapshot.
-- Pages: the overview, filtered lists, the Machine page, and the task detail panel. "Needs you" uses the snapshot's own `hints.open_decisions`, `hold_bucket == "live"` holds, secondmates' `decisions_open`, and tasks whose current state is `done` with a PR that `bin/fm-crew-state.sh` does not report merged or closed; recently finished is the backlog's Done rows plus `secondmate_landed`. Status logs are never re-folded here (see `docs/architecture.md`, status files are append-only event logs).
+- Pages: the Board with its detail drawer, Charts, card lists behind chart segments, and Machine.
+  Status logs are never re-folded here (see `docs/architecture.md`, status files are append-only event logs).
 - A snapshot whose `schema` is not `fm-fleet-snapshot.v1` is rejected by the server and the page, loudly, rather than rendered.
 
 ## Threat model
