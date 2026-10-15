@@ -7,8 +7,10 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const resourcesLib = require('./resources');
 const history = require('./history');
+const { killStray } = require('./stray-kill');
 const R = require('./public/render');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
@@ -28,6 +30,9 @@ const TAIL_LINES = 200;
 const TAIL_BYTES = 64 * 1024;
 const INBOX_TEXT_BYTES = 4 * 1024;
 const HISTORY_POINTS = 360;
+const KILL_ROUTE = /^\/api\/stray-helpers\/(\d+)\/kill$/;
+const MAX_BODY_BYTES = 4096;
+const TOKEN_PLACEHOLDER = '__WEBVIEW_TOKEN__';
 
 const parseSnapshot = (stdout) => {
   let snapshot;
@@ -116,6 +121,22 @@ const makePoller = (startRun, pollMs, onValue = () => {}) => {
   };
 };
 
+const readBody = (req) => new Promise((resolve, reject) => {
+  let body = '';
+  let isTooLarge = false;
+  req.setEncoding('utf8');
+  // An oversized body is drained rather than cut off, so the client still gets the refusal.
+  req.on('data', (chunk) => {
+    isTooLarge ||= body.length + chunk.length > MAX_BODY_BYTES;
+    if (!isTooLarge) body += chunk;
+  });
+  req.on('end', () => (isTooLarge ? reject(new Error('body too large')) : resolve(body)));
+  req.on('error', reject);
+});
+
+const sameToken = (given, token) => typeof given === 'string' && given.length === token.length
+  && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(token));
+
 const readTail = async (file) => {
   let text;
   try { text = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
@@ -138,6 +159,7 @@ const readInbox = async (dir) => {
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
   resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
+  killDeps = {}, token = crypto.randomBytes(24).toString('hex'),
 }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
@@ -168,20 +190,45 @@ async function start({
     return sendJson(res, 200, state.value, meta);
   };
 
+  // Origin must be this page, the token must match this launch, and the stray
+  // rules are re-checked against a fresh process table inside killStray.
+  const handleKill = async (req, res, pid) => {
+    if (req.headers.origin !== `http://${req.headers.host}`) return sendJson(res, 403, { outcome: 'refused', reason: 'request did not come from this page' });
+    if (!sameToken(req.headers['x-webview-token'], token)) return sendJson(res, 403, { outcome: 'refused', reason: 'missing or wrong page token; reload the page' });
+    if (!/^application\/json(;|$)/.test(req.headers['content-type'] ?? '')) return sendJson(res, 415, { outcome: 'refused', reason: 'expected application/json' });
+    let expected;
+    try { expected = JSON.parse(await readBody(req)); } catch { return sendJson(res, 400, { outcome: 'refused', reason: 'body must be JSON under 4 KB' }); }
+    if (!(pid > 1) || typeof expected?.command !== 'string' || typeof expected?.ageSeconds !== 'number') {
+      return sendJson(res, 400, { outcome: 'refused', reason: 'expected {command, ageSeconds} for a pid above 1' });
+    }
+    const result = await killStray(pid, expected, killDeps);
+    console.error(`webview: stray helper ${pid}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}`);
+    const status = { refused: 409, failed: 500 }[result.outcome] ?? 200;
+    return sendJson(res, status, { pid, ...result });
+  };
+
   const server = http.createServer(async (req, res) => {
     const { port: boundPort } = server.address();
     // Rejecting foreign Host headers blocks DNS-rebinding reads of fleet data.
     if (![`127.0.0.1:${boundPort}`, `localhost:${boundPort}`].includes(req.headers.host)) {
       return sendJson(res, 421, { error: 'unexpected Host header' });
     }
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const { pathname } = new URL(req.url, 'http://localhost');
+    const kill = pathname.match(KILL_ROUTE);
+    // Stopping a stray helper is the only write; every other route is read-only.
+    // Unread request bodies are drained so a refused request leaves the connection usable.
+    if (req.method !== 'POST' || !kill) req.resume();
+    if (kill && req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, { Allow: 'POST' });
+    if (!kill && req.method !== 'GET' && req.method !== 'HEAD') {
       return sendJson(res, 405, { error: 'read-only: GET only' }, { Allow: 'GET, HEAD' });
     }
-    const { pathname } = new URL(req.url, 'http://localhost');
     try {
+      if (kill) return await handleKill(req, res, Number(kill[1]));
       if (Object.hasOwn(STATIC, pathname)) {
         const [file, type] = STATIC[pathname];
-        return send(res, 200, type, await fs.promises.readFile(path.join(PUBLIC_DIR, file)));
+        const body = await fs.promises.readFile(path.join(PUBLIC_DIR, file));
+        // The page carries this launch's token; other origins cannot read it, so they cannot send it back.
+        return send(res, 200, type, pathname === '/' ? body.toString('utf8').replace(TOKEN_PLACEHOLDER, token) : body);
       }
       if (pathname === '/api/snapshot') return sendCached(res, snapshots.state, 'Snapshot');
       if (pathname === '/api/resources') return sendCached(res, resources.state, 'Resources');

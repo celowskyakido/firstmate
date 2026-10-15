@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="webview-token" content="__WEBVIEW_TOKEN__">
   <title>Firstmate</title>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
@@ -23,6 +24,8 @@
   <section id="alerts" role="alert" hidden></section>
   <main id="view"><p class="muted">Loading the first snapshot…</p></main>
   <dialog id="detail" aria-labelledby="detail-title"><div id="detail-body"></div></dialog>
+  <dialog id="confirm" class="confirm" aria-labelledby="confirm-title"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/render.js"></script>
   <script src="/charts.js"></script>
   <script src="/app.js"></script>

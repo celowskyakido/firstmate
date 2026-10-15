@@ -221,8 +221,95 @@
       machineTrends(),
       panel(`Claude sessions (${v.sessions.length})`, 'Largest first, including their helper processes.',
         v.sessions.length ? plain(['Session', 'Memory', 'Processes', 'MCP helpers', 'Age'], v.sessions.map((x) => [[x.name], [x.memory, 'num'], [x.processes, 'num'], [x.mcpHelpers, 'num'], [x.age, 'num']])) : empty('No Claude sessions.')),
-      panel(`Stray helpers (${v.orphans.length})`, 'Helper processes older than an hour whose parent has exited.',
-        v.orphans.length ? plain(['PID', 'Command', 'Memory', 'Age'], v.orphans.map((o) => [[o.pid, 'num'], [o.command, 'command'], [o.memory, 'num'], [o.age, 'num']])) : empty('None.'))];
+      strayPanel(v.orphans)];
+  };
+
+  // ---- stopping stray helpers: the page's only write, guarded again on the server ----
+  const token = document.querySelector('meta[name="webview-token"]')?.content ?? '';
+  const confirmBox = document.getElementById('confirm');
+  const toast = document.getElementById('toast');
+  const strays = { busy: new Set(), gone: new Set(), problem: '' };
+  const strayKey = (o) => `${o.pid}:${o.command}`;
+  const OUTCOME = { terminated: 'stopped', killed: 'force-stopped after it ignored the stop request', 'already-gone': 'was already gone' };
+
+  const showToast = (message, tone) => {
+    toast.textContent = message;
+    toast.className = `toast toast-${tone}`;
+    toast.hidden = false;
+    clearTimeout(showToast.timer);
+    showToast.timer = setTimeout(() => { toast.hidden = true; }, 8000);
+  };
+
+  const confirmStop = (list) => new Promise((resolve) => {
+    const row = (k, v) => el('div', {}, text('dt', k), text('dd', v));
+    const cancel = el('button', { type: 'button', className: 'close', textContent: 'Cancel', onclick: () => confirmBox.close('cancel') });
+    confirmBox.replaceChildren(
+      text('h2', list.length === 1 ? `Stop stray helper ${list[0].pid}?` : `Stop all ${list.length} stray helpers?`, { id: 'confirm-title' }),
+      text('p', 'Each one gets a stop request, then a force stop if it is still running 3 seconds later. The server checks each one again first and refuses anything that is no longer a stray.', { className: 'muted' }),
+      el('div', { className: 'confirm-list' }, list.map((o) => el('dl', { className: 'confirm-item' },
+        row('PID', o.pid), row('Age', o.age), row('Parent', o.ppid === 1 ? 'none (adopted by init, pid 1)' : String(o.ppid)), row('Memory', o.memory),
+        row('Command', o.command.length > 140 ? `${o.command.slice(0, 139)}…` : o.command)))),
+      el('div', { className: 'confirm-actions' }, cancel,
+        el('button', { type: 'button', className: 'danger', textContent: list.length === 1 ? 'Stop it' : `Stop all ${list.length}`, onclick: () => confirmBox.close('stop') })));
+    confirmBox.returnValue = '';
+    confirmBox.addEventListener('close', () => resolve(confirmBox.returnValue === 'stop'), { once: true });
+    confirmBox.showModal();
+    cancel.focus();
+  });
+
+  const stopOne = async (o) => {
+    try {
+      const res = await fetch(`/api/stray-helpers/${encodeURIComponent(o.pid)}/kill`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webview-Token': token },
+        body: JSON.stringify({ command: o.command, ageSeconds: o.ageSeconds }),
+      });
+      return await res.json().catch(() => ({ outcome: 'failed', reason: `HTTP ${res.status}` }));
+    } catch (e) {
+      return { outcome: 'failed', reason: `could not reach the web view server: ${e.message}` };
+    }
+  };
+
+  const stopStrays = async (list) => {
+    if (!list.length || !(await confirmStop(list))) return;
+    list.forEach((o) => strays.busy.add(strayKey(o)));
+    strays.problem = '';
+    renderBase();
+    const failures = [];
+    for (const o of list) {
+      const result = await stopOne(o);
+      strays.busy.delete(strayKey(o));
+      if (OUTCOME[result.outcome]) strays.gone.add(strayKey(o));
+      else failures.push(`${o.pid}: ${result.reason ?? result.outcome}`);
+      if (list.length === 1) {
+        showToast(OUTCOME[result.outcome] ? `Stray helper ${o.pid} ${OUTCOME[result.outcome]}.` : `Did not stop ${o.pid}: ${result.reason ?? result.outcome}.`, OUTCOME[result.outcome] ? 'ok' : 'error');
+      }
+      renderBase();
+    }
+    if (list.length > 1) {
+      showToast(`Stopped ${list.length - failures.length} of ${list.length} stray helpers.${failures.length ? ` Not stopped: ${failures.join('; ')}.` : ''}`, failures.length ? 'error' : 'ok');
+    }
+    strays.problem = failures.length ? `Not stopped: ${failures.join('; ')}.` : '';
+    renderBase();
+  };
+
+  const strayPanel = (orphans) => {
+    // A pid stays hidden after a stop until the next reading drops it.
+    strays.gone.forEach((k) => { if (!orphans.some((o) => strayKey(o) === k)) strays.gone.delete(k); });
+    const shown = orphans.filter((o) => !strays.gone.has(strayKey(o)));
+    const stoppable = shown.filter((o) => o.isYours && !strays.busy.has(strayKey(o)));
+    return el('section', { className: 'panel' },
+      el('div', { className: 'panel-head' }, text('h3', `Stray helpers (${shown.length})`),
+        shown.length ? el('button', { type: 'button', className: 'danger', textContent: 'Kill all strays', key: 'stray:all', disabled: !stoppable.length || strays.busy.size > 0,
+          onclick: () => stopStrays(stoppable) }) : ''),
+      text('p', 'Helper processes older than an hour whose parent has exited. Stopping one sends it a stop request, then a force stop after 3 seconds.', { className: 'subtitle' }),
+      strays.problem ? text('p', strays.problem, { className: 'problem', role: 'alert' }) : '',
+      shown.length ? el('table', { className: 'strays' }, el('thead', {}, el('tr', {}, ['PID', 'Command', 'Memory', 'Age', ''].map((h) => text('th', h)))),
+        el('tbody', {}, shown.map((o) => el('tr', {},
+          text('td', o.pid, { className: 'num' }), text('td', o.command, { className: 'command' }), text('td', o.memory, { className: 'num' }), text('td', o.age, { className: 'num' }),
+          el('td', {}, o.isYours
+            ? el('button', { type: 'button', className: 'danger small', key: `stray:${strayKey(o)}`, textContent: strays.busy.has(strayKey(o)) ? 'Stopping…' : 'Kill',
+              disabled: strays.busy.size > 0, aria: { label: `Kill stray helper ${o.pid}` }, onclick: () => stopStrays([o]) })
+            : text('span', "Another user's", { className: 'muted' })))))) : empty('None.'));
   };
 
   // ---- detail drawer ----
@@ -416,7 +503,7 @@
       health.textContent = v.badge.text;
       alertsBox.hidden = !v.alerts.length;
       alertsBox.replaceChildren(text('h2', 'Machine alerts'), el('ul', {}, v.alerts.map((a) => text('li', a))));
-      if (!snapshot || dialog.open) return;
+      if (!snapshot || document.querySelector('dialog[open]')) return;
       // On the board only the KPI strip depends on the machine, so the columns and search box stay put.
       if (view.contains(boardNode)) {
         const focusKey = document.activeElement?.dataset?.key;

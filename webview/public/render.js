@@ -352,7 +352,11 @@
     sessions: r.sessions.map((s) => ({
       name: s.cwd ?? `pid ${s.pid}`, memory: bytes(s.rssBytes), processes: String(s.processes), mcpHelpers: String(s.mcpHelpers), age: duration(s.ageSeconds),
     })),
-    orphans: r.orphans.map((o) => ({ pid: String(o.pid), command: o.command, memory: bytes(o.rssBytes), age: duration(o.ageSeconds) })),
+    // The raw command and age go back with a stop request so the server can spot a reused pid.
+    orphans: r.orphans.map((o) => ({
+      pid: String(o.pid), ppid: o.ppid ?? null, command: o.command, memory: bytes(o.rssBytes), age: duration(o.ageSeconds), ageSeconds: o.ageSeconds,
+      isYours: r.uid == null || o.uid == null || o.uid === r.uid,
+    })),
   });
 
   // KPI strip: one tile per waiting column plus finished today and the machine.

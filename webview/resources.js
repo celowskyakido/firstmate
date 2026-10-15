@@ -72,9 +72,10 @@ const sessionTrees = (procs) => {
   }).sort((a, b) => b.rssBytes - a.rssBytes);
 };
 
-const orphans = (procs) => procs.filter((p) => p.ppid === 1 && p.ageSeconds > LIMITS.orphanAgeSeconds
+// The web view's own process is never listed, even when it was started detached.
+const orphans = (procs, selfPid = process.pid) => procs.filter((p) => p.ppid === 1 && p.pid !== selfPid && p.ageSeconds > LIMITS.orphanAgeSeconds
   && (ORPHAN_COMMANDS.has(commandName(p.args)) || MCP.test(p.args)))
-  .map((p) => ({ pid: p.pid, command: p.args.slice(0, 200), rssBytes: p.rssBytes, ageSeconds: p.ageSeconds }));
+  .map((p) => ({ pid: p.pid, ppid: p.ppid, uid: p.uid, command: p.args.slice(0, 200), rssBytes: p.rssBytes, ageSeconds: p.ageSeconds }));
 
 // macOS: free + inactive + speculative pages are what the kernel can hand out now.
 const parseVmStat = (text, totalBytes) => {
@@ -131,6 +132,7 @@ const run = (cmd, args, timeout) => new Promise((resolve, reject) => {
   execFile(cmd, args, { timeout, maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
 });
 const tolerate = (promise) => promise.catch(() => null);
+const listProcesses = async (exec = run) => parsePs(await exec('ps', PS_ARGS, COMMAND_TIMEOUT_MS));
 
 // `exec` and `readFile` are injectable so tests never touch the real machine.
 const collect = async ({
@@ -163,8 +165,9 @@ const collect = async ({
     },
     sessions,
     orphans: orphans(procs),
+    uid,
   };
   return { ...summary, alerts: alerts(summary), limits: LIMITS };
 };
 
-module.exports = { LIMITS, parseEtime, parsePs, sessionTrees, orphans, parseVmStat, parseMeminfo, parseLinuxProcLimit, parseLsofCwd, alerts, collect };
+module.exports = { LIMITS, parseEtime, parsePs, isSessionRoot, listProcesses, sessionTrees, orphans, parseVmStat, parseMeminfo, parseLinuxProcLimit, parseLsofCwd, alerts, collect };

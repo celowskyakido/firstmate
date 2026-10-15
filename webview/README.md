@@ -8,7 +8,7 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - The keyboard works throughout: `/` focuses search, arrow keys move between cards, Enter opens a card, and Esc closes the drawer and returns focus to the card.
 - The Charts page shows every card by state, open work by project, how long waiting items have sat, and machine trends; the Machine page holds machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
 - Light and dark themes follow the operating system by default; the header toggle cycles system, light, and dark and remembers the choice in `localStorage`.
-- The page only reads: it never answers a decision, holds, merges, or sends anything.
+- Apart from stopping stray helpers on the Machine page, the page only reads: it never answers a decision, holds, merges, or sends anything.
 
 ## Board columns
 
@@ -47,7 +47,8 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 - Machine: load average against core count, free and compressed memory (macOS counts free, inactive, and speculative pages as free; Linux uses `MemAvailable` and has no compressed figure), and your process count against the per-user limit.
 - Claude sessions: every process whose command starts with `claude` (except `claude bg-pty-host` and `claude agents`) with its whole process tree, showing working-directory name, memory including helpers, process count, MCP helper count, and age, largest first.
-- Stray helpers (orphans): `node`, `npm`, `npx`, `python`, `uv`, or MCP helpers whose parent is init and that are older than an hour.
+- Stray helpers (orphans): `node`, `npm`, `npx`, `python`, `uv`, or MCP helpers whose parent is init and that are older than an hour, never the web view's own process.
+  Each of your own has a Kill button, and Kill all strays stops every one; both ask for confirmation first, showing pid, age, parent, memory, and command.
 - Alerts: thresholds live in `LIMITS` at the top of `resources.js` (load above 2x cores, processes above 70% of the limit, a session tree above 300 processes, free memory below 5% or compressed above 50%, a session above 1.5 GB, more than 25 sessions, any orphan). Each alert says what to look at.
 
 ## Charts and history
@@ -70,7 +71,20 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 ## Threat model
 
-Binds `127.0.0.1` only; a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused (DNS rebinding). Only `GET`/`HEAD` are served: the server has no write endpoints. The snapshot script is run with `spawn` and an argument array, never a shell. Every fleet-derived string reaches the DOM through `textContent`, and a test forbids HTML-injecting sinks in the client code. Do not bind `0.0.0.0`.
+- Binds `127.0.0.1` only; a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused (DNS rebinding).
+  Do not bind `0.0.0.0`.
+- Every route is `GET`/`HEAD` only, except one: `POST /api/stray-helpers/<pid>/kill`, which accepts only `POST`.
+  There is no generic kill endpoint and no request field names a command or signal.
+- A stop request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB holding the `command` and `ageSeconds` the page displayed.
+  The token is placed in the served page only; other origins cannot read the page, so they cannot send it back.
+- `stray-kill.js` re-reads the process table at request time and refuses (409) any pid that is not a current stray, belongs to another user, no longer has parent pid 1, is a Claude session or the web view itself, or has any child process.
+  No child of a stray is itself a stray, because a stray must have parent pid 1.
+  It also refuses a pid whose command differs or whose process is younger than the page showed, which catches pid reuse.
+- The stop is `process.kill(pid, 'SIGTERM')`, a wait of up to 3 seconds, then `SIGKILL` if it is still alive, with no shell and no exec.
+  The reply names the outcome: `terminated`, `killed`, `already-gone`, `refused` with a reason, or `failed`, and the server logs every attempt to stderr.
+  A pid can still change between the last check and the signal; the window is a few milliseconds and the identity check above narrows it.
+- The snapshot script is run with `spawn` and an argument array, never a shell.
+- Every fleet-derived string reaches the DOM through `textContent`, and a test forbids HTML-injecting sinks in the client code.
 
 ## Fork hygiene
 
