@@ -15,6 +15,8 @@
   let registry = new Map();
   let resources = null;
   let resourcesLine = '';
+  let resourcesError = null;
+  let snapshotNote = 'Loading the first snapshot (can take up to a minute).';
   let history = { fleet: [], machine: [] };
   let charts = [];
   const filters = { query: '', project: '' };
@@ -215,7 +217,7 @@
   };
 
   const renderMachine = () => {
-    if (!resources) return [text('h2', 'Machine', { className: 'page-title' }), empty('Checking the machine…')];
+    if (!resources) return [text('h2', 'Machine', { className: 'page-title' }), empty(R.machineStatus({ resources, error: resourcesError }))];
     const v = R.resourcesView(resources);
     const plain = (headers, rows) => el('table', {}, el('thead', {}, el('tr', {}, headers.map((h) => text('th', h)))),
       el('tbody', {}, rows.map((r) => el('tr', {}, r.map(([value, cls]) => text('td', value, { className: cls }))))));
@@ -392,10 +394,11 @@
   };
 
   // Re-rendering keeps keyboard focus and opened tables on the element with the same key.
+  // The Machine page needs only the machine reading, so it works while the fleet snapshot is slow or failing.
   const renderBase = (isNavigation = false) => {
-    if (!snapshot) return;
     if (route().page !== 'card') baseHash = location.hash || '#/board';
     const r = route(baseHash);
+    const page = R.viewFor(r.page, { hasSnapshot: Boolean(snapshot) });
     if (r.page === 'board') {
       filters.query = r.params.get('q') ?? '';
       filters.project = r.params.get('project') ?? '';
@@ -403,9 +406,10 @@
     const focusKey = document.activeElement?.dataset?.key;
     const openKeys = [...view.querySelectorAll('details[open]')].map((d) => d.dataset.key);
     try {
-      if (r.page === 'board') renderBoard(isNavigation ? r.column : null);
-      else view.replaceChildren(...[r.page === 'list' ? renderList(r.filter) : r.page === 'machine' ? renderMachine() : renderCharts()].flat());
-      document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
+      if (page === 'board') renderBoard(isNavigation ? r.column : null);
+      else if (page === 'waiting') view.replaceChildren(text('h2', 'Waiting for the fleet snapshot', { className: 'page-title' }), text('p', snapshotNote, { className: 'muted' }));
+      else view.replaceChildren(...[page === 'list' ? renderList(r.filter) : page === 'machine' ? renderMachine() : renderCharts()].flat());
+      if (snapshot) document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
     } catch (e) {
       return showBanner({ tone: 'error', text: e.message });
     }
@@ -469,7 +473,12 @@
   const refresh = async () => {
     try {
       const [body, res] = await getJson('/api/snapshot');
-      if (body.loading) return showBanner(R.freshnessBanner(body));
+      if (body.loading) {
+        snapshotNote = R.freshnessBanner(body).text;
+        showBanner(R.freshnessBanner(body));
+        if (!snapshot && route().page !== 'machine') renderBase();
+        return;
+      }
       const stale = res.headers.get('X-Snapshot-Stale');
       showBanner(R.freshnessBanner({
         fetchedAt: res.headers.get('X-Snapshot-Fetched-At'),
@@ -485,6 +494,7 @@
         if (route().page === 'card') syncDetail();
       }
     } catch (e) {
+      snapshotNote = snapshot ? snapshotNote : e.message;
       showBanner({ tone: 'error', text: snapshot ? `Lost contact with the web view server: ${e.message}` : e.message });
     }
   };
@@ -496,8 +506,11 @@
       history = trend;
       if (body.loading) {
         health.textContent = body.error ? 'Machine check failing' : 'Checking machine…';
+        resourcesError = body.error;
+        if (route().page === 'machine') renderBase();
         return;
       }
+      resourcesError = null;
       const stale = res.headers.get('X-Resources-Stale');
       resourcesLine = R.freshnessBanner({ fetchedAt: res.headers.get('X-Resources-Fetched-At'), stale: stale && decodeURIComponent(stale) }).text;
       if (res.headers.get('X-Resources-Version') === resourcesVersion && !stale) return;
@@ -508,7 +521,7 @@
       health.textContent = v.badge.text;
       alertsBox.hidden = !v.alerts.length;
       alertsBox.replaceChildren(text('h2', 'Machine alerts'), el('ul', {}, v.alerts.map((a) => text('li', a))));
-      if (!snapshot || document.querySelector('dialog[open]')) return;
+      if (document.querySelector('dialog[open]')) return;
       // On the board only the KPI strip depends on the machine, so the columns and search box stay put.
       if (view.contains(boardNode)) {
         const focusKey = document.activeElement?.dataset?.key;
@@ -518,6 +531,8 @@
     } catch (e) {
       health.className = 'health health-error';
       health.textContent = `Machine check unavailable: ${e.message}`;
+      resourcesError = e.message;
+      if (!resources && route().page === 'machine') renderBase();
     }
   };
 

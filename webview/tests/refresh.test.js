@@ -89,3 +89,20 @@ test('polls never overlap even when a run outlasts the poll interval', async (t)
   const log = fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n');
   log.forEach((line, i) => assert.equal(line, i % 2 ? 'end' : 'start', `overlapping run at line ${i}: ${log.join(',')}`));
 });
+
+test('machine readings and stray controls are served while the snapshot is still loading or failing', async (t) => {
+  setMode('fail');
+  const reading = { alerts: [], orphans: [], sessions: [] };
+  const app = await start({ home, port: 0, pollMs: 60_000, snapshotTimeoutMs: 5000, snapshotScript: script, resourcesPollMs: 60_000, collectResources: async () => reading });
+  t.after(() => app.close());
+  await app.ready;
+  await app.resourcesReady;
+  const snapshot = await get(app.port);
+  assert.deepEqual([snapshot.status, snapshot.body.loading], [503, true]);
+  assert.match(snapshot.body.error, /exit code 3/);
+  const machine = await fetch(`http://127.0.0.1:${app.port}/api/resources`);
+  assert.deepEqual([machine.status, await machine.json()], [200, reading]);
+  const page = await (await fetch(`http://127.0.0.1:${app.port}/`)).text();
+  assert.match(page, /<meta name="webview-token" content="[0-9a-f]{48}">/, 'the page and its stop token load without a snapshot');
+});
+

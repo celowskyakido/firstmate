@@ -95,6 +95,17 @@ test('cards: a status decision, a captain hold, and finished work, with worker t
   assert.deepEqual([done.id, done.column, done.date, done.prUrl], ['demo-old', 'done', '2026-07-08', 'https://example.invalid/demo/pull/3']);
 });
 
+test('the Machine page works without a fleet snapshot; other pages wait for it', () => {
+  assert.equal(R.viewFor('machine', { hasSnapshot: false }), 'machine');
+  for (const page of ['board', 'charts', 'list']) {
+    assert.equal(R.viewFor(page, { hasSnapshot: false }), 'waiting', page);
+    assert.equal(R.viewFor(page, { hasSnapshot: true }), page, page);
+  }
+  assert.equal(R.machineStatus({ resources: null, error: null }), 'Checking the machine…');
+  assert.equal(R.machineStatus({ resources: null, error: 'ps timed out' }), 'The machine check is failing: ps timed out. Retrying.');
+  assert.equal(R.machineStatus({ resources: {}, error: 'ps timed out' }), null);
+});
+
 test('task detail carries the status history and inbox for known tasks only', () => {
   const detail = R.taskDetail(real, 'demo-task-1', { status_history: ['a'], inbox: { pending: [], handled: [] } });
   assert.deepEqual(detail.statusHistory, ['a']);

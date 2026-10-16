@@ -76,7 +76,19 @@
 
   const steerTarget = (task) => task.actions?.steer?.split(/\s+/)[1] ?? null;
   const shellQuote = (value) => `'${value.replace(/'/g, "'\\''")}'`;
-  const holdCommand = (id) => `bin/fm-captain-hold.sh answer ${id} --decision-file <file with your answer> --release`;
+  // `answer` records the captain's words and closes a question; `--release` records
+  // them and lets held work resume instead (captain-hold-lifecycle: answer vs release).
+  const HOLD_STEPS = {
+    question: [['Command firstmate would run (records your answer and closes the question)', '']],
+    work: [['Command firstmate would run (records your answer and lets the work go ahead)', ' --release']],
+    unknown: [['If it is a question, firstmate would run (records your answer and closes it)', ''],
+      ['If the held work should go ahead, firstmate would run', ' --release']],
+  };
+  const holdCommands = (id, shape, prefix = '', labelSuffix = '') => HOLD_STEPS[shape ?? 'unknown'].map(([label, flag]) => ({
+    label: `${label}${labelSuffix}`, text: `${prefix}bin/fm-captain-hold.sh answer ${id} --decision-file <file with your answer>${flag}`,
+  }));
+  // A captain-kind row is the question itself; a held ship, scout, or other work row resumes once answered.
+  const holdShape = (record) => (record?.kind === 'captain' ? 'question' : record?.kind ? 'work' : null);
 
   // A decision recorded in a second mate's home is answered in that home, never
   // this one: its command names that FM_HOME, or is left out when the home is
@@ -85,10 +97,10 @@
     if (d.owner) {
       const isHold = d.kind === 'captain-hold';
       return [{ label: 'Tell firstmate', text: `For second mate ${d.owner.id}, ${isHold ? `decision on ${d.holdId}` : `${d.key} (${d.summary})`}: <your answer>` },
-        isHold && d.owner.home && { label: `Command firstmate would run in second mate ${d.owner.id}'s home`, text: `FM_HOME=${shellQuote(d.owner.home)} ${holdCommand(d.holdId)}` }];
+        ...(isHold && d.owner.home ? holdCommands(d.holdId, d.shape, `FM_HOME=${shellQuote(d.owner.home)} `, `, in second mate ${d.owner.id}'s home`) : [])];
     }
     if (d.kind === 'captain-hold') {
-      return [{ label: 'Tell firstmate', text: `Decision on ${d.holdId ?? c.id}: <your call>` }, { label: 'Command firstmate would run', text: holdCommand(d.holdId ?? c.id) }];
+      return [{ label: 'Tell firstmate', text: `Decision on ${d.holdId ?? c.id}: <your call>` }, ...holdCommands(d.holdId ?? c.id, d.shape)];
     }
     return [{ label: 'Tell firstmate', text: `For ${c.id} (${d.summary}): <your answer>` },
       target && { label: 'Command firstmate would run', text: `bin/fm-send.sh ${target} --resolve-key ${d.key} '<your answer>'` }];
@@ -143,7 +155,7 @@
     const byId = new Map(records.map((r) => [r.id, r]));
     const holdAge = (r) => (r.hold_set && Date.parse(r.hold_set) ? Math.max(0, (generatedMs - Date.parse(r.hold_set)) / 1000)
       : r.hold_age_days == null ? null : r.hold_age_days * DAY);
-    const holdDecision = (r) => ({ key: r.id, kind: 'captain-hold', holdId: r.id, summary: r.hold_reason ?? r.title ?? r.id, until: r.hold_until ?? null, ageSeconds: holdAge(r) });
+    const holdDecision = (r, shape = holdShape(r)) => ({ key: r.id, kind: 'captain-hold', holdId: r.id, shape, summary: r.hold_reason ?? r.title ?? r.id, until: r.hold_until ?? null, ageSeconds: holdAge(r) });
     const oldest = (decisions) => decisions.reduce((max, d) => (d.ageSeconds != null && (max == null || d.ageSeconds > max) ? d.ageSeconds : max), null);
     const out = [];
     const taskCards = new Map();
@@ -155,7 +167,8 @@
       const lastUpdateSeconds = task.paths?.status_log?.last_event?.age_seconds ?? null;
       // An open status decision has no timestamp of its own, so it ages from the latest status event.
       const decisions = open.filter((d) => d.verb !== 'blocked').map((d) => ({ key: d.key, kind: d.verb, summary: d.summary, ageSeconds: lastUpdateSeconds }));
-      if (record?.hold_bucket === 'live') decisions.push(holdDecision(record));
+      // A hold on a dispatched task gates work that is already under way, so answering releases it.
+      if (record?.hold_bucket === 'live') decisions.push(holdDecision(record, 'work'));
       const t = {
         kind: task.kind, mode: task.mode, state: task.current_state?.state ?? 'unknown', prUrl: task.pr?.url ?? null,
         isPrSettled: PR_SETTLED.test(task.current_state?.detail ?? '') || Boolean(record?.merged),
@@ -400,6 +413,14 @@
     })),
   });
 
+  // What a page can show right now. Only the Machine page works without a fleet
+  // snapshot, because it reads the machine directly; the rest wait for the snapshot.
+  const viewFor = (page, { hasSnapshot }) => (page === 'machine' || hasSnapshot ? page : 'waiting');
+
+  // The Machine page's line before its first reading arrives.
+  const machineStatus = ({ resources, error }) => (resources ? null
+    : error ? `The machine check is failing: ${error}. Retrying.` : 'Checking the machine…');
+
   // KPI strip: one tile per waiting column plus finished today and the machine.
   // Each links to its column or page; sparklines come from the server's trend history.
   const kpis = ({ counts, machine, limits = {}, history = { fleet: [], machine: [] } }) => {
@@ -430,7 +451,7 @@
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
-    cards, cardRegistry, workColumn, boardView, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    cards, cardRegistry, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
     duration, localDate,
   };
 });

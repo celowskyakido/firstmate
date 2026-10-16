@@ -75,7 +75,8 @@ test('captain holds age from when they were set, and work waiting on other work 
   assert.deepEqual([by['demo-next'].column, by['demo-next'].decisions, by['demo-next'].resolve[0].text], ['blocked', [], 'Starts once demo-a lands.']);
   assert.equal(by['demo-idle'], undefined, 'plain queued work stays off the board');
   assert.deepEqual(by['demo-h1'].resolve.map((s) => s.text), ['Decision on demo-h1: <your call>',
-    'bin/fm-captain-hold.sh answer demo-h1 --decision-file <file with your answer> --release']);
+    'bin/fm-captain-hold.sh answer demo-h1 --decision-file <file with your answer>',
+    'bin/fm-captain-hold.sh answer demo-h1 --decision-file <file with your answer> --release'], 'a hold of unknown kind offers both, each labelled');
 });
 
 test('a live hold on a running task makes the task card a decision instead of a second card', () => {
@@ -101,6 +102,7 @@ test('second mate decisions join the second mate card, replace its relayed copy,
   assert.deepEqual(own.resolve.map((s) => s.text), [
     'For second mate demo-mate, demo-mate-q (the second mate record): <your answer>',
     'For second mate demo-mate, decision on demo-hold: <your answer>',
+    `FM_HOME='/tmp/demo homes/mate'\\''s' bin/fm-captain-hold.sh answer demo-hold --decision-file <file with your answer>`,
     `FM_HOME='/tmp/demo homes/mate'\\''s' bin/fm-captain-hold.sh answer demo-hold --decision-file <file with your answer> --release`,
   ], 'a second mate record is answered in its own home, never with a main-home command');
   const remote = all.find((c) => c.source === 'secondmate');
@@ -119,6 +121,23 @@ test('two children of one second mate that reuse a decision key stay distinct', 
   assert.deepEqual(keys.map((k) => registry.get(k).title), ['approve child one', 'approve child two'], 'each key opens its own decision');
   const withOwner = snap([task('demo-mate', 'parked', { kind: 'secondmate', age: HOUR })], [], { secondmate_current: { records: [{ id: 'demo-mate', decisions_open: children }] } });
   assert.deepEqual(R.cards(withOwner).find((c) => c.id === 'demo-mate').decisions.map((d) => d.summary), ['approve child one', 'approve child two']);
+});
+
+test('a question hold is answered and closed; held work is answered and released', () => {
+  const records = [
+    { id: 'demo-question', title: 'Which name?', repo: 'demo-web', state: 'queued', kind: 'captain', hold_bucket: 'live', hold_reason: 'Reports or Insights?', hold_age_days: 1 },
+    { id: 'demo-work', title: 'Ship the export', repo: 'demo-web', state: 'queued', kind: 'ship', hold_bucket: 'live', hold_reason: 'approve the plan first', hold_age_days: 1 },
+  ];
+  const running = task('demo-running', 'working', { age: 60 });
+  running.backlog = { ...running.backlog, kind: 'captain', hold_bucket: 'live', hold_reason: 'go ahead?' };
+  const by = Object.fromEntries(R.cards(snap([running], [...records, running.backlog])).map((c) => [c.id, c]));
+  const steps = (id) => by[id].resolve.slice(1).map((s) => [s.label, s.text]);
+  assert.deepEqual(steps('demo-question'), [['Command firstmate would run (records your answer and closes the question)',
+    'bin/fm-captain-hold.sh answer demo-question --decision-file <file with your answer>']]);
+  assert.deepEqual(steps('demo-work'), [['Command firstmate would run (records your answer and lets the work go ahead)',
+    'bin/fm-captain-hold.sh answer demo-work --decision-file <file with your answer> --release']]);
+  assert.deepEqual(steps('demo-running').map(([, text]) => text), ['bin/fm-captain-hold.sh answer demo-running --decision-file <file with your answer> --release'],
+    'a hold on a task already under way gates that work, so it is released');
 });
 
 test('a live hold ages from when it was set, not from the latest worker update', () => {
