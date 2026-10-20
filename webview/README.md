@@ -9,7 +9,7 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - The Machine page reads only the machine, so it, the sessions list, and the stray-helper controls work while the fleet snapshot is still loading or failing; the other pages say they are waiting for the snapshot.
 - The Charts page shows every card by state, open work by project, how long waiting items have sat, and machine trends; the Machine page holds machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
 - Light and dark themes follow the operating system by default; the header toggle cycles system, light, and dark and remembers the choice in `localStorage`.
-- Apart from stopping stray helpers on the Machine page and cancelling outdated items (below), the page only reads: it never otherwise answers a decision, holds, merges, or sends anything.
+- Apart from stopping stray helpers on the Machine page and cancelling outdated items (below), and dismissing or snoozing chat radar items, the page only reads: it never otherwise answers a decision, holds, merges, or sends anything.
 
 ## Cancelling outdated decisions and tasks
 
@@ -36,6 +36,35 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - A `done` task with an open PR goes to Ready to land when it ran the no-mistakes pipeline (its review is done and it awaits the merge call) and to Waiting on review when it is a direct PR; a merged or closed PR goes to Done.
 - A paused task or one with no live status that has a PR goes to Waiting on review; a `done` local-only task goes to Ready to land; a finished investigation goes to Waiting on review.
 - Everything else in flight is Working, with a badge for paused, parked, or no live status; Done (recent) lists the latest 15 backlog Done rows and second-mate landings.
+
+## Chat radar
+
+An agent job in the firstmate home (not part of this directory) reads Slack and Teams and writes `FM_HOME/data/radar.json`; the server cannot call MCP and only reads that file, on every `GET /api/radar`.
+Slack and Teams are equal, independent sources: each always gets its own status line, and a failed or out-of-date source never hides the other's items.
+
+- Without `data/radar.json` the API answers `{"present": false}` and the board looks exactly as before.
+- The file must have `"schema": "fm-radar.v1"`, `generatedAt`, both `sources.slack` and `sources.teams` (`health` of `ok`, `degraded`, or `unavailable`, `reason`, `readAt`, `maxAgeMinutes`), and `items`; otherwise the panel shows why it could not be read.
+- An item needs `id` (`<source>:` plus 24 hex characters), `source`, `kind` (`mention`, `dm`, `group`, `channel`, `thread`, `new-channel`), `title` (120 characters), `why` (80), `firstSeen`, `lastActivity`, and `state`; an item missing any is dropped and counted in `invalidItems`.
+- Only the named fields are passed on (`who`, `where`, `link`, `snoozedUntil`, and optional `taskIds` too), so a message body in the file never reaches the page; a `link` that is not `http` or `https` becomes `null`.
+- A source reads as failed when `health` is `unavailable` (for example `Slack radar failed: login needed`) and as out of date when `readAt` is older than `maxAgeMinutes`.
+- Items whose `taskIds` name a task get a chat badge on that task's card.
+
+```json
+{"schema": "fm-radar.v1", "generatedAt": "2026-07-08T12:00:00Z",
+ "sources": {"slack": {"health": "unavailable", "reason": "login needed", "readAt": "2026-07-08T09:00:00Z", "maxAgeMinutes": 60},
+             "teams": {"health": "ok", "reason": null, "readAt": "2026-07-08T11:58:00Z", "maxAgeMinutes": 90}},
+ "items": [{"id": "teams:000000000000000000000001", "source": "teams", "kind": "mention", "title": "demo-chat",
+            "link": "https://teams.example.invalid/m/1", "why": "mentions you", "who": null, "where": null,
+            "firstSeen": "2026-07-08T11:50:00Z", "lastActivity": "2026-07-08T11:50:00Z", "state": "new", "taskIds": ["demo-task-1"]}]}
+```
+
+`POST /api/radar/<id>/dismiss` (body `{}`) and `POST /api/radar/<id>/snooze` (body `{"for": "4h"}` or `{"for": "1d"}`) record the choice in `FM_HOME/state/radar-dismissed.json`, which maps an item id to `{"until": <ISO time or null>}`; `null` is a dismiss, and expired snoozes are pruned on the next write:
+
+```json
+{"slack:000000000000000000000002": {"until": null}, "teams:000000000000000000000001": {"until": "2026-07-08T16:00:00.000Z"}}
+```
+
+Hidden items are left out of `GET /api/radar` and counted in `hiddenItems`; the producer's own `dismissed` state and a future `snoozedUntil` hide an item too.
 
 ## Run
 
@@ -90,7 +119,8 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 - Binds `127.0.0.1` only; a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused (DNS rebinding).
   Do not bind `0.0.0.0`.
-- Every route is `GET`/`HEAD` only, except two that accept only `POST`: `POST /api/stray-helpers/<pid>/kill` and `POST /api/cancel`.
+- Every route is `GET`/`HEAD` only, except three that accept only `POST`: `POST /api/stray-helpers/<pid>/kill`, `POST /api/cancel`, and `POST /api/radar/<id>/dismiss|snooze`.
+  The radar writes carry the same Origin, per-launch token, and JSON-only guards as the stop request below, and accept only a well-formed item id.
   There is no generic kill endpoint and no request field names a command, script, or signal.
 - A stop or cancel request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB: for a stop, the `command` and `ageSeconds` the page displayed; for a cancel, `{id, reason, note}`.
   The token is placed in the served page only; other origins cannot read the page, so they cannot send it back.

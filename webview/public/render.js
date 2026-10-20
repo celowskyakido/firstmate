@@ -521,9 +521,47 @@
     ];
   };
 
+  // ---- chat radar ----
+  // Slack and Teams are equal, independent sources, so both always get a status line in one fixed order.
+  const RADAR_SOURCES = [['slack', 'Slack'], ['teams', 'Teams']];
+  const RADAR_KINDS = [['mention', 'Mentions'], ['dm', 'Direct messages'], ['group', 'Group chats'], ['thread', 'Thread replies'], ['channel', 'Channels'], ['new-channel', 'New channels']];
+  const sourceLabel = (key) => RADAR_SOURCES.find(([k]) => k === key)?.[1] ?? key;
+  const sourceBanner = (key, s) => {
+    const name = sourceLabel(key);
+    if (!s) return { source: key, name, tone: 'error', text: `${name} radar: no status in radar.json` };
+    const asOf = s.readAt ? `last read ${s.ageSeconds == null ? 'at an unknown time' : ago(s.ageSeconds * 1000)}` : 'never read';
+    if (s.health === 'unavailable') return { source: key, name, tone: 'error', text: `${name} radar failed: ${s.reason ?? 'no reason given'} (${asOf}; items shown are from then)` };
+    if (s.isStale) return { source: key, name, tone: 'error', text: `${name} radar is out of date: ${asOf}, expected every ${s.maxAgeMinutes} min` };
+    if (s.health === 'degraded') return { source: key, name, tone: 'warn', text: `${name} radar partly working: ${s.reason ?? 'no reason given'} (${asOf})` };
+    return { source: key, name, tone: 'ok', text: `${name} radar ok, ${asOf}` };
+  };
+
+  // null means there is no radar.json, so the page shows nothing new at all.
+  const radarView = (radar) => {
+    if (!radar?.present) return null;
+    if (radar.error) return { error: `Chat radar unreadable: ${radar.error}`, banners: [], groups: [], generated: '', count: 0 };
+    const items = [...radar.items].sort((a, b) => Date.parse(b.lastActivity) - Date.parse(a.lastActivity)).map((x) => ({
+      ...x, sourceName: sourceLabel(x.source), age: x.ageSeconds == null ? '' : ago(x.ageSeconds * 1000),
+    }));
+    return {
+      error: null,
+      generated: `Radar written ${radar.ageSeconds == null ? 'at an unknown time' : ago(radar.ageSeconds * 1000)}`,
+      banners: RADAR_SOURCES.map(([key]) => sourceBanner(key, radar.sources?.[key])),
+      groups: RADAR_KINDS.map(([kind, label]) => ({ kind, label, items: items.filter((x) => x.kind === kind) })).filter((g) => g.items.length),
+      count: items.length,
+    };
+  };
+
+  // Task id -> the radar items that mention it, for the chat icon on task cards.
+  const radarByTask = (view) => {
+    const map = new Map();
+    view?.groups.forEach((g) => g.items.forEach((x) => x.taskIds.forEach((id) => map.set(id, [...(map.get(id) ?? []), x]))));
+    return map;
+  };
+
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
     cards, cardRegistry, cancelPlan, isCancellable, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
-    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources,
+    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask,
   };
 });

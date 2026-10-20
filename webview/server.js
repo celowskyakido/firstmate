@@ -13,6 +13,7 @@ const resourcesLib = require('./resources');
 const history = require('./history');
 const { killStray } = require('./stray-kill');
 const { cancelItem } = require('./cancel');
+const radar = require('./radar');
 const R = require('./public/render');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
@@ -34,6 +35,7 @@ const INBOX_TEXT_BYTES = 4 * 1024;
 const HISTORY_POINTS = 360;
 const KILL_ROUTE = /^\/api\/stray-helpers\/(\d+)\/kill$/;
 const CANCEL_ROUTE = '/api/cancel';
+const RADAR_ROUTE = /^\/api\/radar\/([^/]+)\/(dismiss|snooze)$/;
 const MAX_BODY_BYTES = 4096;
 const TOKEN_PLACEHOLDER = '__WEBVIEW_TOKEN__';
 
@@ -242,6 +244,14 @@ async function start({
     } finally { isCancelling = false; }
   };
 
+  const handleRadar = async (req, res, id, action) => {
+    const body = await readWrite(req, res);
+    if (body === undefined) return undefined;
+    if (!radar.ID.test(id)) return sendJson(res, 400, { outcome: 'refused', reason: 'unknown radar item id' });
+    if (action === 'snooze' && !Object.hasOwn(radar.SNOOZE_MS, body?.for)) return sendJson(res, 400, { outcome: 'refused', reason: 'snooze needs {"for": "4h"} or {"for": "1d"}' });
+    return sendJson(res, 200, { outcome: 'recorded', ...(await radar.recordChoice(home, id, action, body?.for)) });
+  };
+
   const server = http.createServer(async (req, res) => {
     const { port: boundPort } = server.address();
     // Rejecting foreign Host headers blocks DNS-rebinding reads of fleet data.
@@ -250,10 +260,11 @@ async function start({
     }
     const { pathname } = new URL(req.url, 'http://localhost');
     const kill = pathname.match(KILL_ROUTE);
+    const radarChoice = pathname.match(RADAR_ROUTE);
     const isCancel = pathname === CANCEL_ROUTE;
-    // Stopping a stray helper and cancelling a backlog item are the only writes; every other route is read-only.
+    // Stopping a stray helper, cancelling a backlog item, and dismissing or snoozing a radar item are the only writes; every other route is read-only.
     // Unread request bodies are drained so a refused request leaves the connection usable.
-    const isWrite = Boolean(kill) || isCancel;
+    const isWrite = Boolean(kill || radarChoice) || isCancel;
     if (req.method !== 'POST' || !isWrite) req.resume();
     if (isWrite && req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, { Allow: 'POST' });
     if (!isWrite && req.method !== 'GET' && req.method !== 'HEAD') {
@@ -262,6 +273,8 @@ async function start({
     try {
       if (kill) return await handleKill(req, res, Number(kill[1]));
       if (isCancel) return await handleCancel(req, res);
+      if (radarChoice) return await handleRadar(req, res, decodeURIComponent(radarChoice[1]), radarChoice[2]);
+      if (pathname === '/api/radar') return sendJson(res, 200, await radar.readRadar(home));
       if (Object.hasOwn(STATIC, pathname)) {
         const [file, type] = STATIC[pathname];
         const body = await fs.promises.readFile(path.join(PUBLIC_DIR, file));
