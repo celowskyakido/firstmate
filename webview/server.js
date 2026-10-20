@@ -156,6 +156,14 @@ const readInbox = async (dir) => {
   return { pending: await list(dir), handled: await list(path.join(dir, 'handled')) };
 };
 
+// The Jira base URL is company data, so it lives only in the home or the environment, never in this repo.
+const readLinkConfig = (home, env = process.env) => {
+  let file = '';
+  try { file = fs.readFileSync(path.join(home, 'config', 'webview-links'), 'utf8'); } catch { /* optional */ }
+  const jiraBase = (env.WEBVIEW_JIRA_BASE || file.match(/^jira_base=(.*)$/m)?.[1] || '').trim();
+  return { jiraBase: R.isWebUrl(jiraBase) ? jiraBase : null };
+};
+
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
   resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
@@ -231,6 +239,7 @@ async function start({
         return send(res, 200, type, pathname === '/' ? body.toString('utf8').replace(TOKEN_PLACEHOLDER, token) : body);
       }
       if (pathname === '/api/snapshot') return sendCached(res, snapshots.state, 'Snapshot');
+      if (pathname === '/api/config') return sendJson(res, 200, readLinkConfig(home));
       if (pathname === '/api/resources') return sendCached(res, resources.state, 'Resources');
       if (pathname === '/api/history') {
         return sendJson(res, 200, {
@@ -273,7 +282,7 @@ async function start({
   });
 }
 
-module.exports = { start, parseSnapshot, SCHEMA };
+module.exports = { start, parseSnapshot, readLinkConfig, SCHEMA };
 
 if (require.main === module) {
   const home = process.env.FM_HOME;

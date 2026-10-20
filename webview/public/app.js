@@ -20,6 +20,8 @@
   let history = { fleet: [], machine: [] };
   let charts = [];
   const filters = { query: '', project: '' };
+  // Private per-home link settings (the Jira base URL) from the server; empty until it answers.
+  let linkConfig = {};
 
   const el = (tag, props = {}, ...children) => {
     const node = document.createElement(tag);
@@ -33,7 +35,7 @@
     return node;
   };
   const text = (tag, value, props) => el(tag, { ...props, textContent: value ?? '' });
-  const isWebUrl = (url) => /^https?:\/\//i.test(url ?? '');
+  const { isWebUrl } = R;
   const external = (url, label, className) => el('a', { href: url, textContent: label, rel: 'noreferrer noopener', target: '_blank', className });
   const empty = (message) => text('p', message, { className: 'muted empty' });
   const swatch = (group) => el('span', { className: `dot fill-${group}`, aria: { hidden: 'true' } });
@@ -81,7 +83,7 @@
       c.ageSeconds != null ? text('span', R.duration(c.ageSeconds), { className: `age${c.column === 'aging' ? ' age-old' : ''}`,
         title: c.decisions.length ? `Waiting on you for ${R.duration(c.ageSeconds)}` : `Last update ${ago(c.ageSeconds)}` }) : '',
       c.date ? text('span', c.date, { className: 'age' }) : '',
-      c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, R.prNumber(c.prUrl) ? `PR ${R.prNumber(c.prUrl)}` : 'PR', 'pr-badge') : '',
+      R.cardSources(c, linkConfig).map((s) => external(s.url, s.label, s.kind === 'pr' ? 'pr-badge' : `source-badge source-${s.kind}`)),
       c.badges.map((b) => text('span', b, { className: 'badge' }))));
 
   // ---- board ----
@@ -371,7 +373,9 @@
         (c.lastUpdateSeconds ?? (c.decisions.length ? null : c.ageSeconds)) != null ? row('Last update', ago(c.lastUpdateSeconds ?? c.ageSeconds)) : '',
         c.since ? row('Started', c.since) : '',
         c.date ? row('Finished', c.date) : '',
-        row('Pull request', c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, c.prUrl, 'url') : 'None')),
+        row('Pull request', c.prUrl && isWebUrl(c.prUrl) ? external(c.prUrl, c.prUrl, 'url') : 'None'),
+        R.sourceLinks(c, linkConfig).length ? row('Sources', el('ul', { className: 'sources' },
+          R.sourceLinks(c, linkConfig).map((s) => el('li', {}, text('span', s.label, { className: 'badge' }), ' ', external(s.url, s.url, 'url'))))) : ''),
       c.text.length ? block('Full text', c.text.map((line) => text('pre', line))) : '',
       t ? [text('h3', 'Update history'),
         text('p', 'Past updates, oldest first. These are a record, not the current status above.', { className: 'muted' }),
@@ -542,6 +546,7 @@
   });
   let resizeFrame = 0;
   new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(drawCharts); }).observe(view);
+  getJson('/api/config').then(([body]) => { linkConfig = body; if (snapshot) renderBase(); }).catch(() => {});
   refresh();
   refreshResources();
   setInterval(refresh, 3000);

@@ -70,6 +70,7 @@ test('server: snapshot proxy, task detail, and guards', async (t) => {
   assert.deepEqual([trend.fleet[0].decide, trend.fleet[0].aging], [1, 1]);
   assert.deepEqual([trend.machine.length, trend.machine[0].sessions], [1, null], 'a partial reading samples as missing, not zero');
   assert.equal((await get(port, '/api/history', { method: 'POST' })).status, 405);
+  assert.deepEqual(JSON.parse((await get(port, '/api/config')).body), { jiraBase: process.env.WEBVIEW_JIRA_BASE || null }, 'no link config in the fixture home');
   for (const file of ['/charts.js', '/theme.js']) assert.equal((await get(port, file)).status, 200, file);
 
   assert.equal((await get(port, '/api/task/nope')).status, 404);

@@ -178,7 +178,7 @@ test('every other route stays GET-only, and the kill route is POST-only', async 
   t.after(async () => { await app.close(); fs.rmSync(home, { recursive: true, force: true }); });
   const { port } = app;
   const headers = { Origin: `http://127.0.0.1:${port}`, 'X-Webview-Token': 'demo-token', 'Content-Type': 'application/json' };
-  const routes = ['/', '/app.js', '/render.js', '/charts.js', '/theme.js', '/style.css', '/api/snapshot', '/api/resources', '/api/history',
+  const routes = ['/', '/app.js', '/render.js', '/charts.js', '/theme.js', '/style.css', '/api/snapshot', '/api/resources', '/api/history', '/api/config',
     '/api/task/demo-task-1', '/api/stray-helpers', '/api/stray-helpers/400', '/api/stray-helpers/400/kill/now', '/nope'];
   for (const route of routes) {
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
