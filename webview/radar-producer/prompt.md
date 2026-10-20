@@ -6,7 +6,7 @@ Do one read-only pass over Slack and Teams, write two small result files, and st
 - Read only.
   Never post, reply, react, mark anything read, join or open a channel or chat, click, type, press keys, navigate, or open the Teams Activity app.
 - Never copy message text into a result file, and never quote it in your reply.
-  Build every `why` from the rule and the matched token only (a name, or a key such as ABC-123).
+  Build every `why` from the rule and the matched token only (a name, or an issue key: letters, a dash, digits).
 - Each source is independent: a failure in one never stops or changes the other.
 - Never invent, guess, or pad items; an empty list is a fine answer.
 - Use only the tools named below (load them with ToolSearch first when they are deferred).
