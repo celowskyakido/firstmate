@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Read-only, localhost-only web view over `bin/fm-fleet-snapshot.sh --json`.
+// Localhost-only web view over `bin/fm-fleet-snapshot.sh --json`.
 // Zero dependencies. All fleet derivation stays in the snapshot script; this
-// process only caches its output and serves it.
+// process caches its output and serves it. Its only writes are the guarded
+// routes in stray-kill.js and cancel.js.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
@@ -11,6 +12,7 @@ const crypto = require('node:crypto');
 const resourcesLib = require('./resources');
 const history = require('./history');
 const { killStray } = require('./stray-kill');
+const { cancelItem } = require('./cancel');
 const R = require('./public/render');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
@@ -31,6 +33,7 @@ const TAIL_BYTES = 64 * 1024;
 const INBOX_TEXT_BYTES = 4 * 1024;
 const HISTORY_POINTS = 360;
 const KILL_ROUTE = /^\/api\/stray-helpers\/(\d+)\/kill$/;
+const CANCEL_ROUTE = '/api/cancel';
 const MAX_BODY_BYTES = 4096;
 const TOKEN_PLACEHOLDER = '__WEBVIEW_TOKEN__';
 
@@ -167,7 +170,7 @@ const readLinkConfig = (home, env = process.env) => {
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
   resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
-  killDeps = {}, token = crypto.randomBytes(24).toString('hex'),
+  killDeps = {}, cancelDeps = {}, token = crypto.randomBytes(24).toString('hex'),
 }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
@@ -198,14 +201,19 @@ async function start({
     return sendJson(res, 200, state.value, meta);
   };
 
-  // Origin must be this page, the token must match this launch, and the stray
-  // rules are re-checked against a fresh process table inside killStray.
+  // Every write: Origin must be this page and the token must match this launch.
+  // Returns the parsed body, or undefined after sending the refusal.
+  const readWrite = async (req, res) => {
+    if (req.headers.origin !== `http://${req.headers.host}`) return void sendJson(res, 403, { outcome: 'refused', reason: 'request did not come from this page' });
+    if (!sameToken(req.headers['x-webview-token'], token)) return void sendJson(res, 403, { outcome: 'refused', reason: 'missing or wrong page token; reload the page' });
+    if (!/^application\/json(;|$)/.test(req.headers['content-type'] ?? '')) return void sendJson(res, 415, { outcome: 'refused', reason: 'expected application/json' });
+    try { return JSON.parse(await readBody(req)); } catch { return void sendJson(res, 400, { outcome: 'refused', reason: 'body must be JSON under 4 KB' }); }
+  };
+
+  // The stray rules are re-checked against a fresh process table inside killStray.
   const handleKill = async (req, res, pid) => {
-    if (req.headers.origin !== `http://${req.headers.host}`) return sendJson(res, 403, { outcome: 'refused', reason: 'request did not come from this page' });
-    if (!sameToken(req.headers['x-webview-token'], token)) return sendJson(res, 403, { outcome: 'refused', reason: 'missing or wrong page token; reload the page' });
-    if (!/^application\/json(;|$)/.test(req.headers['content-type'] ?? '')) return sendJson(res, 415, { outcome: 'refused', reason: 'expected application/json' });
-    let expected;
-    try { expected = JSON.parse(await readBody(req)); } catch { return sendJson(res, 400, { outcome: 'refused', reason: 'body must be JSON under 4 KB' }); }
+    const expected = await readWrite(req, res);
+    if (expected === undefined) return undefined;
     if (!(pid > 1) || typeof expected?.command !== 'string' || typeof expected?.ageSeconds !== 'number') {
       return sendJson(res, 400, { outcome: 'refused', reason: 'expected {command, ageSeconds} for a pid above 1' });
     }
@@ -213,6 +221,25 @@ async function start({
     console.error(`webview: stray helper ${pid}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}`);
     const status = { refused: 409, failed: 500 }[result.outcome] ?? 200;
     return sendJson(res, status, { pid, ...result });
+  };
+
+  // The id must be cancellable in the current snapshot; cancelItem re-checks it and runs the script.
+  // ponytail: one cancel at a time across the server; per-id locks if several people ever share one page.
+  let isCancelling = false;
+  const handleCancel = async (req, res) => {
+    const body = await readWrite(req, res);
+    if (body === undefined) return undefined;
+    const id = body?.id;
+    if (typeof id !== 'string' || id.length > 120 || !TASK_ID.test(id)) return sendJson(res, 400, { outcome: 'refused', reason: 'expected {id, reason, note} with a task id' });
+    if (!snapshots.state.value) return sendJson(res, 503, { id, outcome: 'refused', reason: 'the fleet snapshot has not loaded yet' });
+    if (isCancelling) return sendJson(res, 409, { id, outcome: 'refused', reason: 'another cancel is still running; try again in a moment' });
+    isCancelling = true;
+    try {
+      const result = await cancelItem({ home, snapshot: snapshots.state.value, id, reason: body.reason, note: body.note, ...cancelDeps });
+      console.error(`webview: cancel ${id}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}`);
+      const status = result.outcome === 'cancelled' ? 200 : result.outcome === 'failed' ? 500 : result.isUnknown ? 404 : result.isBadRequest ? 400 : 409;
+      return sendJson(res, status, { id, outcome: result.outcome, reason: result.reason, output: result.output });
+    } finally { isCancelling = false; }
   };
 
   const server = http.createServer(async (req, res) => {
@@ -223,15 +250,18 @@ async function start({
     }
     const { pathname } = new URL(req.url, 'http://localhost');
     const kill = pathname.match(KILL_ROUTE);
-    // Stopping a stray helper is the only write; every other route is read-only.
+    const isCancel = pathname === CANCEL_ROUTE;
+    // Stopping a stray helper and cancelling a backlog item are the only writes; every other route is read-only.
     // Unread request bodies are drained so a refused request leaves the connection usable.
-    if (req.method !== 'POST' || !kill) req.resume();
-    if (kill && req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, { Allow: 'POST' });
-    if (!kill && req.method !== 'GET' && req.method !== 'HEAD') {
+    const isWrite = Boolean(kill) || isCancel;
+    if (req.method !== 'POST' || !isWrite) req.resume();
+    if (isWrite && req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, { Allow: 'POST' });
+    if (!isWrite && req.method !== 'GET' && req.method !== 'HEAD') {
       return sendJson(res, 405, { error: 'read-only: GET only' }, { Allow: 'GET, HEAD' });
     }
     try {
       if (kill) return await handleKill(req, res, Number(kill[1]));
+      if (isCancel) return await handleCancel(req, res);
       if (Object.hasOwn(STATIC, pathname)) {
         const [file, type] = STATIC[pathname];
         const body = await fs.promises.readFile(path.join(PUBLIC_DIR, file));
@@ -296,6 +326,6 @@ if (require.main === module) {
     pollMs: Number(process.env.WEBVIEW_POLL_MS ?? 7000),
     snapshotTimeoutMs: Number(process.env.WEBVIEW_SNAPSHOT_TIMEOUT_MS ?? 180_000),
     resourcesPollMs: Number(process.env.WEBVIEW_RESOURCES_POLL_MS ?? 5000),
-  }).then(({ port }) => console.log(`webview: http://${HOST}:${port}/ (read-only)`))
+  }).then(({ port }) => console.log(`webview: http://${HOST}:${port}/`))
     .catch((e) => { console.error(`webview: ${e.message}`); process.exit(2); });
 }
