@@ -59,7 +59,7 @@ const prepare = (home, { now = new Date(), anyTime = false } = {}) => {
     SLACK_USER_ID: config.slackUserId, AFTER_UNIX: String(after), LOOKBACK_HOURS: String(config.lookbackHours),
     DENY_CHANNELS: JSON.stringify(config.deny.channels), DENY_SENDERS: JSON.stringify(config.deny.senders),
     TRACKED: tracked.length ? tracked.map((t) => `- ${t.key} -> taskIds ${JSON.stringify(t.taskIds)}`).join('\n') : '- (none)',
-    SLACK_OUT: path.join(outDir, 'slack.json'), TEAMS_OUT: path.join(outDir, 'teams.json'), TEAMS_SCRIPT: path.join(__dirname, 'teams-read.js'),
+    SLACK_OUT: path.join(outDir, 'slack.json'), TEAMS_OUT: path.join(outDir, 'teams.json'), TEAMS_SCRIPT: path.join(outDir, 'teams-read.js'),
     SLACK_TOOL: config.tools.slack, CHROME_TOOL: chromeTool(config),
   });
   const mcp = config.chromeMcp ? { mcpServers: { 'radar-chrome': config.chromeMcp } } : null;
@@ -72,6 +72,8 @@ if (require.main === module) {
     if (!plan) process.exit(3);
     fs.mkdirSync(plan.outDir, { recursive: true });
     fs.writeFileSync(path.join(plan.outDir, 'prompt.txt'), plan.prompt);
+    // The browser MCP server only reads and writes inside the session's workspace roots, which run.sh sets to outDir.
+    fs.copyFileSync(path.join(__dirname, 'teams-read.js'), path.join(plan.outDir, 'teams-read.js'));
     if (plan.mcp) fs.writeFileSync(path.join(plan.outDir, 'mcp.json'), JSON.stringify(plan.mcp));
     process.stdout.write([plan.timeoutSeconds, ...plan.args].map((a) => `${a}\0`).join(''));
   } catch (e) {

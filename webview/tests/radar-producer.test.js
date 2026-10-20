@@ -169,6 +169,7 @@ test('prepare: working hours, prompt values, and a claude argv limited to read t
   assert.match(plan.prompt, /U000DEMO/);
   assert.match(plan.prompt, new RegExp(`after: "${Math.floor(monday10.getTime() / 1000) - 24 * 3600}"`));
   assert.doesNotMatch(plan.prompt, /\{\{\w+\}\}/, 'every placeholder is filled');
+  assert.ok(plan.prompt.includes(`sourcePath: "${path.join(home, 'state', 'radar-producer', 'teams-read.js')}"`), 'the Teams script runs from inside the session workspace');
   const flag = (name) => plan.args[plan.args.indexOf(name) + 1];
   assert.equal(flag('--permission-mode'), 'dontAsk');
   assert.equal(flag('--tools'), 'Write,ToolSearch');

@@ -42,7 +42,7 @@ timeout_s=${args[0]}
 # Stale results from an earlier pass must never be merged as this pass's reads.
 rm -f "$out/slack.json" "$out/teams.json" "$out/timeout"
 say "start"
-claude "${args[@]:1}" <"$out/prompt.txt" >>"$log" 2>&1 &
+(cd "$out" && exec claude "${args[@]:1}" <prompt.txt >>"$log" 2>&1) &
 pid=$!
 (sleep "$timeout_s" && kill -TERM "$pid" 2>/dev/null && echo timeout >"$out/timeout") &
 watchdog=$!
