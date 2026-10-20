@@ -587,6 +587,14 @@
     {
       "path": "webview/README.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "webview/radar-producer/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "webview/radar-producer/prompt.md",
+      "audience": "agent-runtime"
     }
   ]
 }
