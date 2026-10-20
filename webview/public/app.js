@@ -85,7 +85,73 @@
       c.date ? text('span', c.date, { className: 'age' }) : '',
       R.cardSources(c, linkConfig).map((s) => external(s.url, s.label, s.kind === 'pr' ? 'pr-badge' : `source-badge source-${s.kind}`)),
       c.badges.map((b) => text('span', b, { className: 'badge' })),
-      cancelButton(c, 'small')));
+      cancelButton(c, 'small'),
+      chatBadge(c.taskId)));
+
+
+  // ---- chat radar ----
+  let radar = null;
+  let radarJson = '';
+  let radarByTask = new Map();
+  const radarSlot = el('div', {});
+  const chatBadge = (taskId) => {
+    const items = radarByTask.get(taskId);
+    return items?.length ? el('a', { href: '#radar', className: 'source-badge chat-badge', title: items.map((x) => `${x.sourceName}: ${x.title}`).join('\n'),
+      aria: { label: `${items.length} chat item${items.length === 1 ? '' : 's'} about this task` } }, text('span', '💬', { aria: { hidden: 'true' } }), ` ${items.length}`) : '';
+  };
+  const sourceIcon = (x) => text('span', x.sourceName, { className: `source source-${x.source}` });
+
+  const chooseRadar = async (x, action, span) => {
+    try {
+      const res = await fetch(`/api/radar/${encodeURIComponent(x.id)}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webview-Token': token }, body: JSON.stringify(span ? { for: span } : {}),
+      });
+      const body = await res.json().catch(() => ({ reason: `HTTP ${res.status}` }));
+      if (!res.ok) return showToast(`Could not ${action} ${x.title}: ${body.reason ?? res.status}.`, 'error');
+      showToast(action === 'dismiss' ? `Dismissed ${x.title}.` : `Snoozed ${x.title} for ${span}.`, 'ok');
+      refreshRadar();
+    } catch (e) {
+      showToast(`Could not reach the web view server: ${e.message}`, 'error');
+    }
+  };
+
+  const radarRow = (x) => el('li', { className: 'radar-item' },
+    sourceIcon(x),
+    el('div', { className: 'radar-text' }, text('strong', x.title), text('span', x.why, { className: 'muted' })),
+    text('span', x.age, { className: 'age' }),
+    el('span', { className: 'radar-actions' },
+      x.link ? external(x.link, 'Open', 'open') : '',
+      el('button', { type: 'button', className: 'small', textContent: 'Dismiss', key: `radar:${x.id}:dismiss`, aria: { label: `Dismiss ${x.title}` }, onclick: () => chooseRadar(x, 'dismiss') }),
+      ['4h', '1d'].map((span) => el('button', { type: 'button', className: 'small', textContent: `Snooze ${span}`, key: `radar:${x.id}:${span}`,
+        aria: { label: `Snooze ${x.title} for ${span}` }, onclick: () => chooseRadar(x, 'snooze', span) }))));
+
+  const radarPanel = () => {
+    const v = R.radarView(radar);
+    if (!v) return '';
+    return el('section', { className: 'panel radar', id: 'radar', aria: { label: 'Chat radar' } },
+      el('div', { className: 'panel-head' }, text('h3', `Chat radar (${v.count})`), text('span', v.generated, { className: 'muted' })),
+      v.error ? text('p', v.error, { className: 'problem', role: 'alert' }) : '',
+      el('ul', { className: 'radar-sources' }, v.banners.map((b) => text('li', b.text, { className: `radar-source tone-${b.tone}` }))),
+      v.groups.map((g) => el('div', { className: 'radar-group' }, text('h4', `${g.label} (${g.items.length})`), el('ul', {}, g.items.map(radarRow)))),
+      !v.error && !v.count ? empty('Nothing new in Slack or Teams.') : '');
+  };
+
+  const refreshRadar = async () => {
+    try {
+      const [body] = await getJson('/api/radar');
+      if (JSON.stringify(body) === radarJson) return;
+      radarJson = JSON.stringify(body);
+      radar = body;
+    } catch (e) {
+      radar = { present: true, error: `could not reach the web view server: ${e.message}` };
+      radarJson = '';
+    }
+    radarByTask = R.radarByTask(R.radarView(radar));
+    if (view.contains(boardNode)) {
+      radarSlot.replaceChildren(radarPanel());
+      renderBoardColumns();
+    }
+  };
 
   // ---- board ----
   let baseHash = '#/board';
@@ -158,7 +224,8 @@
   const renderBoard = (columnKey) => {
     toolbar.update();
     kpiSlot.replaceChildren(kpiStrip());
-    if (!view.contains(boardNode)) view.replaceChildren(kpiSlot, toolbar.node, boardNode);
+    radarSlot.replaceChildren(radarPanel());
+    if (!view.contains(boardNode)) view.replaceChildren(kpiSlot, radarSlot, toolbar.node, boardNode);
     renderBoardColumns();
     if (columnKey) {
       const col = document.getElementById(`col-${columnKey}`);
@@ -626,6 +693,8 @@
   getJson('/api/config').then(([body]) => { linkConfig = body; if (snapshot) renderBase(); }).catch(() => {});
   refresh();
   refreshResources();
+  refreshRadar();
   setInterval(refresh, 3000);
+  setInterval(refreshRadar, 15000);
   setInterval(refreshResources, 5000);
 })();

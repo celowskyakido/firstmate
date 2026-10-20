@@ -322,3 +322,20 @@ dialog.confirm { margin: auto; height: fit-content; max-height: 85dvh; width: mi
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media (forced-colors: active) { .swatch, .dot { forced-color-adjust: none; } }
+
+/* chat radar: Slack and Teams share one style so neither source reads as secondary */
+.radar ul { list-style: none; margin: 0; padding: 0; }
+.radar-sources { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0 .6rem !important; }
+.radar-source { border-radius: 8px; padding: .2rem .6rem; background: var(--wash-2); font-size: .875rem; }
+.radar-source.tone-error { border-left: 4px solid var(--blocked); }
+.radar-source.tone-warn { border-left: 4px solid var(--needs); }
+.radar-source.tone-ok { border-left: 4px solid var(--working); }
+.radar-group h4 { margin: .6rem 0 .2rem; font-size: .875rem; }
+.radar-item { display: grid; grid-template-columns: 4rem minmax(0, 1fr) auto auto; gap: .6rem; align-items: center; padding: .35rem 0; border-bottom: 1px solid var(--hairline); }
+.radar-text { display: flex; flex-direction: column; min-width: 0; }
+.radar-text > * { overflow-wrap: anywhere; }
+.radar-actions { display: flex; gap: .3rem; align-items: center; }
+.source { border-radius: 999px; padding: .05rem .45rem; text-align: center; font-size: .75rem; font-weight: 600; background: var(--wash-2); color: var(--ink); border: 1px solid var(--hairline); }
+.chat-badge { text-decoration: none; position: relative; z-index: 1; }
+@media (max-width: 40rem) { .radar-item { grid-template-columns: 4rem minmax(0, 1fr); } }
+.radar button.small { font-size: .8125rem; padding: .2rem .6rem; }
