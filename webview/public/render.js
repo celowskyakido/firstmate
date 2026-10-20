@@ -59,6 +59,48 @@
   const decisionColumn = (ageSeconds) => (ageSeconds != null && ageSeconds >= AGING_AFTER ? 'aging' : 'decide');
   const isNoMistakes = (mode) => /^no-mistakes/.test(mode ?? '');
 
+  // ---- source links ----
+  // Only http and https ever become links, so a javascript: or file: URL in a row is never rendered.
+  const isWebUrl = (url) => /^https?:\/\//i.test(url ?? '');
+  const URL_IN_TEXT = /https?:\/\/[^\s)"<>]+/g;
+  const JIRA_KEY = /\b[A-Z][A-Z0-9]+-[0-9]+\b/g;
+  const SOURCE_ORDER = ['pr', 'jira', 'chat', 'doc'];
+  // Matched on the parsed hostname, so a lookalike host in a path or query never passes.
+  const SOURCE_KINDS = [
+    { kind: 'pr', test: (u) => u.hostname === 'github.com' && /^\/[^/]+\/[^/]+\/pull\/\d+/.test(u.pathname), label: (u) => `PR ${prNumber(u.href)}` },
+    { kind: 'jira', test: (u) => u.hostname.endsWith('.atlassian.net') && /^\/browse\/[A-Z][A-Z0-9]+-\d+/.test(u.pathname), label: (u) => u.pathname.split('/')[2] },
+    { kind: 'chat', test: (u) => u.hostname.endsWith('.slack.com') && u.pathname.startsWith('/archives/'), label: () => 'Slack' },
+    { kind: 'chat', test: (u) => ['teams.microsoft.com', 'teams.cloud.microsoft'].includes(u.hostname), label: () => 'Teams' },
+    { kind: 'doc', test: (u) => /(^|\.)notion\.(so|site)$/.test(u.hostname) || u.hostname === 'docs.google.com'
+      || (u.hostname.endsWith('.atlassian.net') && u.pathname.startsWith('/wiki/')), label: () => 'Doc' },
+  ];
+  const classifySource = (url) => {
+    if (!isWebUrl(url)) return null;
+    let u;
+    try { u = new URL(url); } catch { return null; }
+    const match = SOURCE_KINDS.find((k) => k.test(u));
+    return match ? { kind: match.kind, label: match.label(u), url } : null;
+  };
+  // Trailing sentence punctuation is not part of a URL written in prose.
+  const urlsIn = (lines) => (lines ?? []).flatMap((line) => (line.match(URL_IN_TEXT) ?? []).map((u) => u.replace(/[.,;:!?]+$/, '')));
+  const recordUrls = (r) => [...(r?.links ?? []), ...urlsIn(r?.body_lines)];
+
+  // Every recognised source of a card, in fixed kind order, each URL once. The card's own
+  // PR counts whatever its forge; Jira keys in the title link only with a configured base.
+  const sourceLinks = (c, { jiraBase } = {}) => {
+    const base = isWebUrl(jiraBase) ? jiraBase.replace(/\/+$/, '') : null;
+    const keys = base ? (c.title ?? '').match(JIRA_KEY) ?? [] : [];
+    const seen = new Set();
+    return [
+      isWebUrl(c.prUrl) && { kind: 'pr', label: prNumber(c.prUrl) ? `PR ${prNumber(c.prUrl)}` : 'PR', url: c.prUrl },
+      ...(c.sourceUrls ?? []).map(classifySource),
+      ...keys.map((key) => ({ kind: 'jira', label: key, url: `${base}/browse/${key}` })),
+    ].filter((s) => s && !seen.has(s.url) && seen.add(s.url))
+      .sort((a, b) => SOURCE_ORDER.indexOf(a.kind) - SOURCE_ORDER.indexOf(b.kind));
+  };
+  // The card footer shows the first source of each kind.
+  const cardSources = (c, config) => sourceLinks(c, config).filter((s, i, all) => all.findIndex((x) => x.kind === s.kind) === i);
+
   // Where an undecided task sits, from structured fields only: blocked events,
   // current state, unresolved blockers, the PR and whether it settled, and the
   // delivery mode. A no-mistakes run that passed has been reviewed and is waiting
@@ -133,7 +175,7 @@
   // ageSeconds is how long the card has waited: for a decision, since the oldest
   // decision was raised; otherwise since the last update (lastUpdateSeconds).
   const card = (fields) => ({
-    taskId: null, project: NO_PROJECT, ageSeconds: null, lastUpdateSeconds: null, prUrl: null, decisions: [], blockers: { events: [], ids: [], reason: null },
+    taskId: null, project: NO_PROJECT, ageSeconds: null, lastUpdateSeconds: null, prUrl: null, sourceUrls: [], decisions: [], blockers: { events: [], ids: [], reason: null },
     stateDetail: null, text: [], date: null, badges: [], ...fields,
   });
 
@@ -142,7 +184,7 @@
     ...(snapshot.secondmate_landed?.records ?? []),
   ].map((r) => ({
     id: r.id, title: r.title ?? r.raw ?? r.id, project: r.repo ?? null, home: r.home_id ?? null,
-    verb: r.completion?.verb ?? null, date: r.completion?.date ?? r.done ?? null, url: r.pr_url ?? r.report_path ?? null,
+    verb: r.completion?.verb ?? null, date: r.completion?.date ?? r.done ?? null, url: r.pr_url ?? r.report_path ?? null, sourceUrls: recordUrls(r),
   })).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
 
   // Every board card, classified from the snapshot's structured fields. Status logs
@@ -178,7 +220,7 @@
       const ageSeconds = decisions.length ? oldest(decisions) : lastUpdateSeconds;
       const c = card({
         key: `task:${task.id}`, source: 'task', id: task.id, taskId: task.id, title: record?.title ?? task.id,
-        project: task.project ?? record?.repo ?? NO_PROJECT, ageSeconds, lastUpdateSeconds, prUrl: t.prUrl, decisions,
+        project: task.project ?? record?.repo ?? NO_PROJECT, ageSeconds, lastUpdateSeconds, prUrl: t.prUrl, sourceUrls: recordUrls(record), decisions,
         blockers: { events: t.blockedEvents, ids: t.blockerIds, reason: record?.blocked_reason ?? null },
         state: t.state, stateDetail: task.current_state?.detail ?? null, kind: task.kind, since: record?.since ?? null,
         text: [record?.body_excerpt, task.hints?.last_event_text].filter(Boolean),
@@ -227,7 +269,7 @@
       const ageSeconds = isHeld ? holdAge(r) : null;
       const c = card({
         key: `${isHeld ? 'hold' : 'queued'}:${r.id}`, source: isHeld ? 'hold' : 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT,
-        ageSeconds, prUrl: r.pr_url ?? null, decisions: isHeld ? [holdDecision(r)] : [],
+        ageSeconds, prUrl: r.pr_url ?? null, sourceUrls: recordUrls(r), decisions: isHeld ? [holdDecision(r)] : [],
         blockers: { events: [], ids: blockerIds, reason: r.blocked_reason ?? null }, since: r.since ?? null,
         text: [r.body_excerpt].filter(Boolean),
         column: blockerIds.length ? 'blocked' : decisionColumn(ageSeconds),
@@ -239,7 +281,7 @@
 
     finishedRecords(snapshot).slice(0, recentLimit).forEach((f) => out.push(card({
       key: `done:${f.home ?? ''}:${f.id}`, source: 'finished', id: f.id, title: f.title, project: f.project ?? NO_PROJECT,
-      prUrl: /^https?:/.test(f.url ?? '') ? f.url : null, date: f.date, column: 'done', resolve: [],
+      prUrl: /^https?:/.test(f.url ?? '') ? f.url : null, sourceUrls: f.sourceUrls, date: f.date, column: 'done', resolve: [],
       text: [f.home && `Finished via ${f.home}`, f.url && !/^https?:/.test(f.url) && f.url].filter(Boolean),
       badges: [f.verb === 'merged' ? 'Merged' : f.verb ? 'Finished' : null].filter(Boolean),
     })));
@@ -247,7 +289,7 @@
   };
 
   const queuedCard = (r) => card({
-    key: `queued:${r.id}`, source: 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT, column: 'queued', resolve: [],
+    key: `queued:${r.id}`, source: 'queued', id: r.id, title: r.title ?? r.id, project: r.repo ?? NO_PROJECT, column: 'queued', resolve: [], sourceUrls: recordUrls(r),
     since: r.since ?? null, text: [r.hold_reason && `On hold: ${r.hold_reason}`, r.body_excerpt].filter(Boolean), badges: ['Not started'],
   });
 
@@ -452,6 +494,6 @@
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
     cards, cardRegistry, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
-    duration, localDate,
+    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources,
   };
 });

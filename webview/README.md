@@ -36,6 +36,7 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 - `FM_HOME` is required and never guessed; the server exits with status 2 without it.
 - Optional: `WEBVIEW_PORT` (default `4780`), `WEBVIEW_POLL_MS` (default `7000`, the pause between one refresh finishing and the next starting), `WEBVIEW_SNAPSHOT_TIMEOUT_MS` (default `180000`), `WEBVIEW_RESOURCES_POLL_MS` (default `5000`).
+- Optional source links: a card links to the PR, Jira issue, Slack or Teams thread, and Notion, Confluence, or Google doc found in its backlog title and body lines (put a `Source: <url>` body line on chat-originated work). Jira keys such as `ABC-123` in a title become links only when a Jira base URL is set in `WEBVIEW_JIRA_BASE` or in the home's gitignored `config/webview-links` file as `jira_base=https://your-site.example` (the environment wins; the file is re-read on each page load); without it they stay plain text. Keep that URL out of tracked files.
 - Zero dependencies; needs Node 20+ and whatever `bin/fm-fleet-snapshot.sh` needs (`jq`).
 
 ## Snapshot cost
