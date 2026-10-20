@@ -303,6 +303,36 @@
     return registry;
   };
 
+  // Whether the page may cancel a backlog item, and how. Only an item no worker or
+  // PR watch holds: a captain hold closes through fm-captain-hold.sh so the reason
+  // is recorded as the captain's answer; a plain queued item closes through tasks-axi.
+  // The server runs this same check against its own snapshot before acting.
+  const cancelPlan = (snapshot, id) => {
+    const record = (snapshot?.backlog?.records ?? []).find((r) => r.id != null && r.id === id);
+    if (!record) return { refusal: "it is not in this home's backlog", isUnknown: true };
+    if (record.state === 'done') return { refusal: 'it is already finished' };
+    if ((snapshot.tasks ?? []).some((t) => t.id === id)) return { refusal: 'a worker is on it; ask firstmate to stop it instead' };
+    if (record.pr_url) return { refusal: 'it has a pull request that firstmate is watching' };
+    if (record.hold_bucket) return { kind: 'decision', effect: 'Records your reason as the answer and closes the decision. Nothing else runs.' };
+    if (record.state === 'queued') return { kind: 'queued', effect: 'Moves the task to Done without starting it, with your reason in its note.' };
+    return { refusal: 'it is in flight' };
+  };
+  // Cards the page offers Cancel on; every other card belongs to live work or another home.
+  const isCancellable = (snapshot, c) => (c.source === 'hold' || c.source === 'queued') && Boolean(cancelPlan(snapshot, c.id).kind);
+
+  const CANCEL_REASONS = [['outdated', 'Outdated'], ['handled', 'Already handled'], ['other', 'Other']];
+  const CANCEL_NOTE_MAX = 200;
+  // The recorded reason: a fixed phrase plus at most a short one-line note.
+  const cancelReason = ({ reason, note = '' } = {}) => {
+    const label = CANCEL_REASONS.find(([key]) => key === reason)?.[1];
+    if (!label) return { error: 'choose a reason: Outdated, Already handled, or Other' };
+    if (typeof note !== 'string') return { error: 'the note must be text' };
+    const clean = note.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim();
+    if (clean.length > CANCEL_NOTE_MAX) return { error: `keep the note to ${CANCEL_NOTE_MAX} characters` };
+    if (reason === 'other' && !clean) return { error: 'add a short note saying why' };
+    return { reason, note: clean, text: `Cancelled from the dashboard: ${label.toLowerCase()}${clean ? `. Note: ${clean}` : ''}` };
+  };
+
   // Oldest first, so the longest waits are on top; recently finished work shows newest first.
   const byAge = (a, b) => (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1);
   const byDate = (a, b) => (b.date ?? '9999').localeCompare(a.date ?? '9999');
@@ -493,7 +523,7 @@
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
-    cards, cardRegistry, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    cards, cardRegistry, cancelPlan, isCancellable, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
     duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources,
   };
 });

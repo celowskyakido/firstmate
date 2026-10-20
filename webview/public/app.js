@@ -84,7 +84,8 @@
         title: c.decisions.length ? `Waiting on you for ${R.duration(c.ageSeconds)}` : `Last update ${ago(c.ageSeconds)}` }) : '',
       c.date ? text('span', c.date, { className: 'age' }) : '',
       R.cardSources(c, linkConfig).map((s) => external(s.url, s.label, s.kind === 'pr' ? 'pr-badge' : `source-badge source-${s.kind}`)),
-      c.badges.map((b) => text('span', b, { className: 'badge' }))));
+      c.badges.map((b) => text('span', b, { className: 'badge' })),
+      cancelButton(c, 'small')));
 
   // ---- board ----
   let baseHash = '#/board';
@@ -212,8 +213,9 @@
   const backLink = () => el('p', { className: 'back' }, el('a', { href: '#/board', textContent: 'Back to the board', key: 'back' }));
 
   const renderList = (filter) => {
-    const list = R.listView(snapshot, filter);
-    if (!list) return [backLink(), text('h2', 'Nothing to show for this link', { className: 'page-title' })];
+    const found = R.listView(snapshot, filter);
+    if (!found) return [backLink(), text('h2', 'Nothing to show for this link', { className: 'page-title' })];
+    const list = { ...found, cards: found.cards.filter((c) => !isHidden(c)) };
     return [backLink(), text('h2', `${list.title} (${list.cards.length})`, { className: 'page-title' }),
       list.cards.length ? el('div', { className: 'card-grid' }, list.cards.map(cardNode)) : empty('Nothing here right now.')];
   };
@@ -319,6 +321,79 @@
             : text('span', "Another user's", { className: 'muted' })))))) : empty('None.'));
   };
 
+  // ---- cancelling a held decision or queued task: guarded again on the server ----
+  // An id stays hidden after a cancel until a snapshot no longer offers it.
+  const cancelled = new Set();
+  let isCancelBusy = false;
+  const isHidden = (c) => cancelled.has(c.id) && (c.source === 'hold' || c.source === 'queued');
+  const pruneCancelled = () => cancelled.forEach((id) => { if (!R.cancelPlan(snapshot, id).kind) cancelled.delete(id); });
+  const hideCancelled = () => {
+    allCards = allCards.filter((c) => !isHidden(c));
+    registry = new Map([...registry].filter(([, c]) => !isHidden(c)));
+  };
+
+  const confirmCancel = (c, plan) => new Promise((resolve) => {
+    let choice = null;
+    const problem = el('p', { className: 'problem', role: 'alert', hidden: true });
+    const radios = R.CANCEL_REASONS.map(([value, label]) => el('label', { className: 'reason' },
+      el('input', { type: 'radio', name: 'cancel-reason', value }), text('span', label)));
+    const note = el('input', { type: 'text', maxLength: R.CANCEL_NOTE_MAX, className: 'note', id: 'cancel-note' });
+    const keep = el('button', { type: 'button', className: 'close', textContent: 'Keep it', onclick: () => confirmBox.close() });
+    const submit = () => {
+      const picked = R.cancelReason({ reason: confirmBox.querySelector('input[name="cancel-reason"]:checked')?.value, note: note.value });
+      if (picked.error) {
+        problem.textContent = `Cannot cancel yet: ${picked.error}.`;
+        problem.hidden = false;
+        return;
+      }
+      choice = { reason: picked.reason, note: picked.note };
+      confirmBox.close();
+    };
+    confirmBox.replaceChildren(
+      text('h2', `Cancel "${c.title}"?`, { id: 'confirm-title' }),
+      text('p', `${plan.effect} Use this for an item that is outdated or already handled.`, { className: 'muted' }),
+      el('fieldset', { className: 'reasons' }, text('legend', 'Why cancel it?'), radios),
+      el('label', { className: 'note-label', htmlFor: 'cancel-note' }, `Short note (required for Other, up to ${R.CANCEL_NOTE_MAX} characters)`), note,
+      problem,
+      el('div', { className: 'confirm-actions' }, keep, el('button', { type: 'button', className: 'danger', textContent: 'Cancel it', onclick: submit })));
+    confirmBox.addEventListener('close', () => resolve(choice), { once: true });
+    confirmBox.showModal();
+    radios[0].querySelector('input').focus();
+  });
+
+  const postCancel = async (body) => {
+    try {
+      const res = await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webview-Token': token }, body: JSON.stringify(body) });
+      return await res.json().catch(() => ({ outcome: 'failed', reason: `HTTP ${res.status}` }));
+    } catch (e) {
+      return { outcome: 'failed', reason: `could not reach the web view server: ${e.message}` };
+    }
+  };
+
+  const cancelCard = async (c) => {
+    const plan = R.cancelPlan(snapshot, c.id);
+    const choice = plan.kind && await confirmCancel(c, plan);
+    if (!choice) return;
+    isCancelBusy = true;
+    renderBase();
+    const result = await postCancel({ id: c.id, ...choice });
+    isCancelBusy = false;
+    if (result.outcome === 'cancelled') {
+      cancelled.add(c.id);
+      hideCancelled();
+      showToast(`Cancelled "${c.title}". It leaves the board for good on the next refresh.`, 'ok');
+      if (route().page === 'card') dialog.close();
+    } else {
+      showToast(`Did not cancel "${c.title}": ${result.reason ?? result.outcome}.${result.output ? ` ${result.output}` : ''}`, 'error');
+    }
+    renderBase();
+  };
+
+  const cancelButton = (c, size = '') => (snapshot && R.isCancellable(snapshot, c)
+    ? el('button', { type: 'button', className: `danger ${size}`.trim(), textContent: 'Cancel', key: `cancel:${size}:${c.key}`, disabled: isCancelBusy,
+      aria: { label: `Cancel ${c.title}` }, onclick: () => cancelCard(c) })
+    : '');
+
   // ---- detail drawer ----
   const copyText = async (value) => {
     try { await navigator.clipboard.writeText(value); return true; } catch { /* fall back below */ }
@@ -355,7 +430,7 @@
       el('div', { className: 'detail-head' },
         el('div', {}, text('h2', c.title, { id: 'detail-title' }),
           el('p', { className: 'detail-meta' }, text('span', R.projectName(c.project), { className: 'chip' }), text('span', c.id, { className: 'muted' }))),
-        closeButton()),
+        el('div', { className: 'detail-actions' }, cancelButton(c), closeButton())),
       el('p', { className: 'status' }, swatch(groupOf(c.column)), text('strong', column?.label ?? 'Queued'), c.badges.map((b) => text('span', b, { className: 'badge' }))),
       c.decisions.length ? block(c.decisions.length === 1 ? 'The decision' : `${c.decisions.length} decisions`,
         c.decisions.map((d) => el('div', { className: 'decision' }, text('p', d.summary), d.reason ? text('p', d.reason, { className: 'muted' }) : '',
@@ -365,7 +440,7 @@
         c.blockers.ids.length ? el('p', {}, 'Waiting on ', c.blockers.ids.map((id, i) => [i ? ', ' : '', blockerLink(id)])) : '',
         c.blockers.reason ? text('p', c.blockers.reason, { className: 'muted' }) : '') : '',
       c.resolve.length ? el('section', { className: 'detail-block resolve' }, text('h3', 'How to resolve it'),
-        text('p', 'Nothing runs from this page. Copy a reply for firstmate, or the command it would run.', { className: 'muted' }),
+        text('p', 'Apart from Cancel, nothing runs from this page. Copy a reply for firstmate, or the command it would run.', { className: 'muted' }),
         c.resolve.map(copyRow)) : '',
       el('dl', {},
         c.stateDetail ? row('Latest status', c.stateDetail) : '',
@@ -493,6 +568,8 @@
         snapshot = R.assertSchema(body);
         allCards = R.cards(snapshot);
         registry = R.cardRegistry(snapshot);
+        pruneCancelled();
+        hideCancelled();
         version = res.headers.get('X-Snapshot-Version');
         renderBase();
         if (route().page === 'card') syncDetail();

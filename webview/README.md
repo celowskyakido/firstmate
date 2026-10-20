@@ -1,6 +1,6 @@
 # Firstmate web view (fork-only)
 
-A read-only, localhost-only dashboard over the fleet and the machine it runs on.
+A localhost-only dashboard over the fleet and the machine it runs on.
 It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders it.
 
 - The Board is the main view: a KPI strip with sparklines above a kanban of seven columns (Needs your decision, Aging decisions, Blocked, Working, Waiting on review, Ready to land, Done (recent)), with search, a project filter, and column counts.
@@ -9,7 +9,17 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - The Machine page reads only the machine, so it, the sessions list, and the stray-helper controls work while the fleet snapshot is still loading or failing; the other pages say they are waiting for the snapshot.
 - The Charts page shows every card by state, open work by project, how long waiting items have sat, and machine trends; the Machine page holds machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
 - Light and dark themes follow the operating system by default; the header toggle cycles system, light, and dark and remembers the choice in `localStorage`.
-- Apart from stopping stray helpers on the Machine page, the page only reads: it never answers a decision, holds, merges, or sends anything.
+- Apart from stopping stray helpers on the Machine page and cancelling outdated items (below), the page only reads: it never otherwise answers a decision, holds, merges, or sends anything.
+
+## Cancelling outdated decisions and tasks
+
+- A held captain decision, or a queued or held backlog task with no worker, shows a Cancel button on its card and in its drawer; a card for live work, a task with a PR firstmate is watching, or a second mate's decision never does.
+- The confirm dialog shows the title, says what will happen, and requires a reason: Outdated, Already handled, or Other with a short note (one line, at most 200 characters).
+- A held decision is closed with `bin/fm-captain-hold.sh answer <id> --decision-file <file>` (no `--release`), the file holding `Cancelled from the dashboard: <reason>` and the note; a queued task is closed with `bin/fm-tasks-axi.sh done <id> --note <the same text>`.
+  Both run with `FM_HOME` set and an argument array; the page never edits the backlog itself.
+- A successful cancel hides the card at once and the next snapshot drops it; a refusal or script failure is shown with its reason and the script's output.
+- Every attempt, refused or not, appends one JSON line (`at`, `id`, `reason`, `note`, `outcome`) to `$FM_HOME/state/webview-cancel.log`, which is captain-private like the rest of `state/`.
+- Bulk cancel and undo are deliberately absent.
 
 ## Board columns
 
@@ -80,9 +90,9 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 - Binds `127.0.0.1` only; a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused (DNS rebinding).
   Do not bind `0.0.0.0`.
-- Every route is `GET`/`HEAD` only, except one: `POST /api/stray-helpers/<pid>/kill`, which accepts only `POST`.
-  There is no generic kill endpoint and no request field names a command or signal.
-- A stop request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB holding the `command` and `ageSeconds` the page displayed.
+- Every route is `GET`/`HEAD` only, except two that accept only `POST`: `POST /api/stray-helpers/<pid>/kill` and `POST /api/cancel`.
+  There is no generic kill endpoint and no request field names a command, script, or signal.
+- A stop or cancel request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB: for a stop, the `command` and `ageSeconds` the page displayed; for a cancel, `{id, reason, note}`.
   The token is placed in the served page only; other origins cannot read the page, so they cannot send it back.
 - `stray-kill.js` re-reads the process table at request time and refuses (409) any pid that is not a current stray, belongs to another user, no longer has parent pid 1, is a Claude session or the web view itself, or has any child process.
   No child of a stray is itself a stray, because a stray must have parent pid 1.
@@ -91,6 +101,8 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
   Before `SIGKILL` the process table is read again: if the pid is gone, or now belongs to a different owner, command, or a younger process (a reused pid), the reply is `already-gone` and nothing more is sent; if it is the same process but no longer a stray, it is refused without the force stop.
   The reply names the outcome: `terminated`, `killed`, `already-gone`, `refused` with a reason, or `failed`, and the server logs every attempt to stderr.
   A pid can still change between the last check and the signal; the window is a few milliseconds and the identity check above narrows it.
+- `cancel.js` refuses (404) an id not in the current snapshot's backlog and (409) one that is finished, has a task record (a worker), has a PR, or is in flight; it also refuses an id whose `state/<id>.meta` appeared after the snapshot, and (400) a missing reason or an Other with no note.
+  The id must look like a task id, so it can never reach a script as a flag, and only one cancel runs at a time.
 - The snapshot script is run with `spawn` and an argument array, never a shell.
 - Every fleet-derived string reaches the DOM through `textContent`, and a test forbids HTML-injecting sinks in the client code.
 

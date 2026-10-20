@@ -292,6 +292,13 @@ dialog.confirm { margin: auto; height: fit-content; max-height: 85dvh; width: mi
 .confirm-item > div { grid-template-columns: 5.5rem 1fr; }
 .confirm-item dd { font-size: .875rem; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: .6rem; }
+.detail-actions { display: flex; gap: .5rem; align-items: center; }
+.card-meta .danger.small { margin-left: auto; }
+.reasons { border: 1px solid var(--hairline); border-radius: 8px; margin: .75rem 0; padding: .4rem .75rem .6rem; display: grid; gap: .3rem; }
+.reasons legend { font-weight: 600; padding: 0 .3rem; }
+.reason { display: flex; gap: .5rem; align-items: center; cursor: pointer; }
+.note-label { display: block; font-size: .875rem; margin-bottom: .25rem; }
+.confirm .note { width: 100%; box-sizing: border-box; font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--hairline); border-radius: 6px; padding: .35rem .5rem; margin-bottom: .75rem; }
 .toast { position: fixed; z-index: 20; right: 1.25rem; bottom: 1.25rem; max-width: min(28rem, 90vw); background: var(--card); color: var(--ink); border-left: 4px solid var(--working); border-radius: 8px; padding: .7rem 1rem; box-shadow: var(--shadow-lift); }
 .toast-error { border-left-color: var(--blocked); }
 
