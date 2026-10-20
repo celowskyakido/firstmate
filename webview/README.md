@@ -39,7 +39,7 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 
 ## Chat radar
 
-An agent job in the firstmate home (not part of this directory) reads Slack and Teams and writes `FM_HOME/data/radar.json`; the server cannot call MCP and only reads that file, on every `GET /api/radar`.
+A scheduled agent job ([`radar-producer/`](radar-producer/README.md)) reads Slack and Teams and writes `FM_HOME/data/radar.json`; the server cannot call MCP and only reads that file, on every `GET /api/radar`.
 Slack and Teams are equal, independent sources: each always gets its own status line, and a failed or out-of-date source never hides the other's items.
 
 - Without `data/radar.json` the API answers `{"present": false}` and the board looks exactly as before.

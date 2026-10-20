@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Replace every /ABSOLUTE/PATH placeholder, then see README.md "Install" in this directory. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.firstmate.radar-producer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/ABSOLUTE/PATH/TO/firstmate/webview/radar-producer/run.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FM_HOME</key>
+    <string>/ABSOLUTE/PATH/TO/your/firstmate/home</string>
+    <key>PATH</key>
+    <string>/ABSOLUTE/PATH/TO/node/bin:/ABSOLUTE/PATH/TO/claude/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/your/firstmate/home/state/radar-producer.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/your/firstmate/home/state/radar-producer.launchd.log</string>
+</dict>
+</plist>
