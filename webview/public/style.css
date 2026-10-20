@@ -109,6 +109,11 @@ h3 { font-size: 1.125rem; }
 nav { display: flex; gap: 1rem; }
 nav a { color: var(--ink-2); text-decoration: none; padding: .25rem 0; border-bottom: 2px solid transparent; }
 nav a[aria-current="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.tabs { display: flex; gap: .25rem; }
+.tabs [role="tab"] { display: inline-flex; align-items: center; gap: .4rem; color: var(--ink-2); text-decoration: none; padding: .25rem .6rem; border-radius: 6px 6px 0 0; border-bottom: 2px solid transparent; }
+.tabs [role="tab"][aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+.tab-count { font-size: .75rem; font-variant-numeric: tabular-nums; background: var(--wash-2); color: var(--ink-2); border-radius: 999px; padding: .05rem .5rem; }
+.tab-warn { width: .6rem; height: .6rem; border-radius: 50%; background: var(--blocked); }
 .meta { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; font-size: .875rem; }
 #freshness { color: var(--muted); }
 .health { color: var(--ink); text-decoration: none; padding: .15rem .6rem; border-radius: 999px; background: var(--wash); }

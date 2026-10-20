@@ -93,7 +93,6 @@
   let radar = null;
   let radarJson = '';
   let radarByTask = new Map();
-  const radarSlot = el('div', {});
   const chatBadge = (taskId) => {
     const items = radarByTask.get(taskId);
     return items?.length ? el('a', { href: '#radar', className: 'source-badge chat-badge', title: items.map((x) => `${x.sourceName}: ${x.title}`).join('\n'),
@@ -127,7 +126,7 @@
 
   const radarPanel = () => {
     const v = R.radarView(radar);
-    if (!v) return '';
+    if (!v) return empty(R.radarTab(radar).emptyMessage);
     return el('section', { className: 'panel radar', id: 'radar', aria: { label: 'Chat radar' } },
       el('div', { className: 'panel-head' }, text('h3', `Chat radar (${v.count})`), text('span', v.generated, { className: 'muted' })),
       v.error ? text('p', v.error, { className: 'problem', role: 'alert' }) : '',
@@ -135,6 +134,50 @@
       v.groups.map((g) => el('div', { className: 'radar-group' }, text('h4', `${g.label} (${g.items.length})`), el('ul', {}, g.items.map(radarRow)))),
       !v.error && !v.count ? empty('Nothing new in Slack or Teams.') : '');
   };
+
+  const radarNode = el('div', { className: 'radar-page' });
+  const radarPage = () => (radar ? radarPanel() : text('p', 'Loading the chat radar…', { className: 'muted' }));
+
+  // ---- tabs: Board and Radar, built once so focus survives every refresh ----
+  const tabsBox = document.getElementById('tabs');
+  const tabNodes = new Map();
+  const tabParts = (key) => {
+    if (!tabNodes.has(key)) {
+      const node = el('a', { role: 'tab', id: `tab-${key}`, className: 'tab', key: `tab:${key}` });
+      const label = el('span', {});
+      const count = el('span', { className: 'tab-count' });
+      const warn = el('span', { className: 'tab-warn', aria: { hidden: 'true' } });
+      node.append(label, count, warn);
+      tabNodes.set(key, { node, label, count, warn });
+      tabsBox.append(node);
+    }
+    return tabNodes.get(key);
+  };
+  const renderTabs = () => {
+    const list = R.tabs({ page: route(baseHash).page, snapshot, radar });
+    list.forEach((t, i) => {
+      const { node, label, count, warn } = tabParts(t.key);
+      node.href = t.href;
+      node.setAttribute('aria-selected', String(t.isSelected));
+      node.setAttribute('aria-label', t.description);
+      node.tabIndex = t.isSelected || (!list.some((x) => x.isSelected) && !i) ? 0 : -1;
+      label.textContent = t.label;
+      count.textContent = t.count == null ? '' : String(t.count);
+      count.hidden = t.count == null;
+      warn.hidden = !t.hasWarning;
+    });
+  };
+  tabsBox.addEventListener('keydown', (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    const keys = ['Home', 'End'];
+    if (!step && !keys.includes(e.key)) return;
+    const nodes = [...tabNodes.values()].map((t) => t.node);
+    const at = nodes.indexOf(document.activeElement);
+    const next = nodes[e.key === 'Home' ? 0 : e.key === 'End' ? nodes.length - 1 : (Math.max(at, 0) + step + nodes.length) % nodes.length];
+    e.preventDefault();
+    next.focus();
+    location.hash = next.getAttribute('href');
+  });
 
   const refreshRadar = async () => {
     try {
@@ -147,10 +190,9 @@
       radarJson = '';
     }
     radarByTask = R.radarByTask(R.radarView(radar));
-    if (view.contains(boardNode)) {
-      radarSlot.replaceChildren(radarPanel());
-      renderBoardColumns();
-    }
+    renderTabs();
+    if (view.contains(boardNode)) renderBoardColumns();
+    else if (view.contains(radarNode)) radarNode.replaceChildren(radarPage());
   };
 
   // ---- board ----
@@ -224,8 +266,7 @@
   const renderBoard = (columnKey) => {
     toolbar.update();
     kpiSlot.replaceChildren(kpiStrip());
-    radarSlot.replaceChildren(radarPanel());
-    if (!view.contains(boardNode)) view.replaceChildren(kpiSlot, radarSlot, toolbar.node, boardNode);
+    if (!view.contains(boardNode)) view.replaceChildren(kpiSlot, toolbar.node, boardNode);
     renderBoardColumns();
     if (columnKey) {
       const col = document.getElementById(`col-${columnKey}`);
@@ -529,15 +570,7 @@
   };
 
   // ---- routing ----
-  const route = (hash = location.hash) => {
-    const [path, query = ''] = hash.slice(1).split('?');
-    const [, page, ...rest] = path.split('/');
-    if (page === 'card' && rest[0]) return { page: 'card', key: decodeURIComponent(rest.join('/')) };
-    if (page === 'task' && rest[0]) return { page: 'card', key: `task:${decodeURIComponent(rest[0])}` };
-    if (page === 'list' && rest.length) return { page, filter: rest.join('/') };
-    if (page === 'machine' || page === 'charts') return { page };
-    return { page: 'board', column: rest[0] ?? null, params: new URLSearchParams(query) };
-  };
+  const route = (hash = location.hash) => R.route(hash);
 
   // Re-rendering keeps keyboard focus and opened tables on the element with the same key.
   // The Machine page needs only the machine reading, so it works while the fleet snapshot is slow or failing.
@@ -550,10 +583,12 @@
       filters.project = r.params.get('project') ?? '';
     }
     const focusKey = document.activeElement?.dataset?.key;
+    const scrollY = window.scrollY;
     const openKeys = [...view.querySelectorAll('details[open]')].map((d) => d.dataset.key);
     try {
       if (page === 'board') renderBoard(isNavigation ? r.column : null);
       else if (page === 'waiting') view.replaceChildren(text('h2', 'Waiting for the fleet snapshot', { className: 'page-title' }), text('p', snapshotNote, { className: 'muted' }));
+      else if (page === 'radar') { if (!view.contains(radarNode)) view.replaceChildren(radarNode); radarNode.replaceChildren(radarPage()); }
       else view.replaceChildren(...[page === 'list' ? renderList(r.filter) : page === 'machine' ? renderMachine() : renderCharts()].flat());
       if (snapshot) document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
     } catch (e) {
@@ -562,6 +597,8 @@
     openKeys.forEach((k) => { const d = view.querySelector(`details[data-key="${CSS.escape(k ?? '')}"]`); if (d) d.open = true; });
     if (focusKey && !dialog.open && !(isNavigation && r.column)) view.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
     drawCharts();
+    renderTabs();
+    if (!isNavigation) window.scrollTo(0, scrollY);
     document.querySelectorAll('nav a').forEach((a) => a.setAttribute('aria-current', String(a.getAttribute('href') === `#/${r.page}`)));
   };
 
@@ -675,7 +712,7 @@
         const focusKey = document.activeElement?.dataset?.key;
         kpiSlot.replaceChildren(kpiStrip());
         if (focusKey?.startsWith('tile:')) kpiSlot.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
-      } else renderBase();
+      } else if (!view.contains(radarNode)) renderBase();
     } catch (e) {
       health.className = 'health health-error';
       health.textContent = `Machine check unavailable: ${e.message}`;

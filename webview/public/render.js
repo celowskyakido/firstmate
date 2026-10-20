@@ -487,7 +487,7 @@
 
   // What a page can show right now. Only the Machine page works without a fleet
   // snapshot, because it reads the machine directly; the rest wait for the snapshot.
-  const viewFor = (page, { hasSnapshot }) => (page === 'machine' || hasSnapshot ? page : 'waiting');
+  const viewFor = (page, { hasSnapshot }) => (page === 'machine' || page === 'radar' || hasSnapshot ? page : 'waiting');
 
   // The Machine page's line before its first reading arrives.
   const machineStatus = ({ resources, error }) => (resources ? null
@@ -559,9 +559,45 @@
     return map;
   };
 
+  // '#radar' and '#/radar' both open the Radar tab; unknown hashes fall back to the board.
+  const route = (hash) => {
+    const [path, query = ''] = hash.slice(1).split('?');
+    const [, page, ...rest] = path.split('/');
+    if (page === 'card' && rest[0]) return { page: 'card', key: decodeURIComponent(rest.join('/')) };
+    if (page === 'task' && rest[0]) return { page: 'card', key: `task:${decodeURIComponent(rest[0])}` };
+    if (page === 'list' && rest.length) return { page, filter: rest.join('/') };
+    if (page === 'machine' || page === 'charts' || page === 'radar') return { page };
+    if (path === 'radar') return { page: 'radar' };
+    return { page: 'board', column: rest[0] ?? null, params: new URLSearchParams(query) };
+  };
+
+  // The Radar tab's badge counts visible items; its warning dot shows even while another tab is open,
+  // so a dead Slack or Teams login is never hidden behind the board.
+  const radarTab = (radar) => {
+    const v = radarView(radar);
+    return {
+      count: v?.count ?? 0,
+      hasWarning: Boolean(v && (v.error || v.banners.some((b) => b.tone === 'error'))),
+      isEmpty: !v || (!v.error && !v.count),
+      emptyMessage: v ? 'Nothing new in Slack or Teams.' : 'No chat radar yet: nothing has written data/radar.json.',
+    };
+  };
+
+  // Tab bar over the two main views; Charts and Machine stay plain links, so neither tab is selected there.
+  const tabs = ({ page, snapshot, radar }) => {
+    const rt = radarTab(radar);
+    const needsYou = snapshot ? fleetCounts(snapshot).needsYou : null;
+    return [
+      { key: 'board', label: 'Board', href: '#/board', count: needsYou, hasWarning: false, isSelected: page === 'board',
+        description: needsYou == null ? 'Board' : `Board, ${needsYou} need${needsYou === 1 ? 's' : ''} you` },
+      { key: 'radar', label: 'Radar', href: '#radar', count: rt.count, hasWarning: rt.hasWarning, isSelected: page === 'radar',
+        description: `Radar, ${rt.count} item${rt.count === 1 ? '' : 's'}${rt.hasWarning ? ', a chat source has a problem' : ''}` },
+    ];
+  };
+
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
     cards, cardRegistry, cancelPlan, isCancellable, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
-    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask,
+    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask, radarTab, tabs, route,
   };
 });
