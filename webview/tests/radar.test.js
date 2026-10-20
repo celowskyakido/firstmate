@@ -160,3 +160,52 @@ test('server: GET /api/radar, and dismiss/snooze carry the same guards as the st
   assert.deepEqual(await list(), []);
   assert.equal((await request(port, '/api/radar', { method: 'PUT', body: '{}' })).status, 405);
 });
+
+const tabsFor = (page, radarValue, snapshot) => R.tabs({ page, snapshot, radar: radarValue });
+const present = (value) => ({ present: true, ...radar.parseRadar(JSON.stringify(value), NOW) });
+
+test('tabs: hash routing opens Radar for #radar and #/radar, Board otherwise, and card links keep their key', () => {
+  assert.equal(R.route('#radar').page, 'radar');
+  assert.equal(R.route('#/radar').page, 'radar');
+  assert.equal(R.route('').page, 'board');
+  assert.equal(R.route('#/board?q=x').params.get('q'), 'x');
+  assert.equal(R.route('#/card/task%3Ademo').key, 'task:demo');
+  assert.equal(R.viewFor('radar', { hasSnapshot: false }), 'radar');
+});
+
+test('tabs: selection follows the page, and Charts or Machine select neither tab', () => {
+  const selected = (page) => tabsFor(page, null, null).filter((t) => t.isSelected).map((t) => t.key);
+  assert.deepEqual(selected('board'), ['board']);
+  assert.deepEqual(selected('radar'), ['radar']);
+  assert.deepEqual(selected('charts'), []);
+  assert.deepEqual(tabsFor('board', null, null).map((t) => t.href), ['#/board', '#radar']);
+});
+
+test('tabs: the Radar badge counts visible items and warns when one source failed, even from the Board tab', () => {
+  const failed = present(file({ sources: { slack: source({ health: 'unavailable', reason: 'login needed' }), teams: source() } }));
+  const [, radarTab] = tabsFor('board', failed, null);
+  assert.equal(radarTab.count, 2);
+  assert.equal(radarTab.hasWarning, true);
+  assert.match(radarTab.description, /2 items, a chat source has a problem/);
+  const healthy = tabsFor('board', present(file()), null)[1];
+  assert.equal(healthy.hasWarning, false);
+  assert.equal(tabsFor('board', present(file({ items: [item('slack', 1)] })), null)[1].description, 'Radar, 1 item');
+  assert.equal(tabsFor('board', present(file({ sources: { slack: source(), teams: source({ readAt: at(120) }) } })), null)[1].hasWarning, true);
+  assert.equal(R.tabs({ page: 'board', radar: { present: true, error: 'bad json' } })[1].hasWarning, true);
+});
+
+test('tabs: no radar.json gives a zero badge, no warning, and the empty state on the Radar tab', () => {
+  const [, radarTab] = tabsFor('radar', { present: false }, null);
+  assert.equal(radarTab.count, 0);
+  assert.equal(radarTab.hasWarning, false);
+  const t = R.radarTab({ present: false });
+  assert.equal(t.isEmpty, true);
+  assert.match(t.emptyMessage, /No chat radar yet/);
+  assert.equal(R.radarTab(present(file({ items: [] }))).emptyMessage, 'Nothing new in Slack or Teams.');
+});
+
+test('tabs: the Board badge counts what needs you and stays blank before the first snapshot', () => {
+  const snapshot = { schema: R.SCHEMA, generated: at(0), tasks: [], backlog: { records: [] } };
+  assert.equal(tabsFor('board', present(file()), snapshot)[0].count, 0);
+  assert.equal(tabsFor('board', null, null)[0].count, null);
+});
