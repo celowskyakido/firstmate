@@ -24,7 +24,7 @@ const source = (s, name, now) => {
   const age = ageSeconds(s.readAt, now);
   return {
     health: s.health, reason: optional(s.reason, 120), readAt: s.readAt, maxAgeMinutes: s.maxAgeMinutes, ageSeconds: age,
-    isStale: age == null || age > s.maxAgeMinutes * 60,
+    isStale: age == null || age > s.maxAgeMinutes * 60, staleSince: isTime(s.staleSince) ? s.staleSince : null, needsSignIn: s.needsSignIn === true,
   };
 };
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Radar producer prepare step: renders prompt.md from the home's private config and backlog,
+// Radar producer prepare step (Slack half; teams-scan.js reads Teams): renders prompt.md from the home's private config and backlog,
 // writes it to FM_HOME/state/radar-producer/prompt.txt, and prints the claude argv NUL-separated
 // (first field: the hard timeout in seconds). Exit 3 means outside the working-hours window.
 // Usage: node prepare.js <FM_HOME> [--any-time]
@@ -12,9 +12,6 @@ const SLACK_READ = ['slack_search_public_and_private', 'slack_read_thread'];
 const SLACK_WRITE = ['slack_send_message', 'slack_send_message_draft', 'slack_schedule_message', 'slack_add_reaction', 'slack_create_canvas',
   'slack_update_canvas', 'slack_create_conversation', 'slack_create_list', 'slack_update_list', 'slack_add_list_record', 'slack_update_list_record',
   'slack_get_file_upload_url', 'slack_complete_file_upload'];
-const CHROME_READ = ['list_pages', 'evaluate_script'];
-const CHROME_WRITE = ['click', 'drag', 'fill', 'fill_form', 'type_text', 'press_key', 'hover', 'navigate_page', 'new_page', 'close_page',
-  'select_page', 'upload_file', 'handle_dialog', 'emulate', 'resize_page'];
 const MAX_TRACKED = 10;
 
 const isWorkingHours = ({ start, end, days }, date = new Date()) => days.includes(date.getDay()) && date.getHours() >= start && date.getHours() < end;
@@ -33,17 +30,12 @@ const trackedWork = (backlog) => {
 
 const claudeArgs = (config, outDir) => {
   const slack = (t) => `${config.tools.slack}__${t}`;
-  const chrome = (t) => `${chromeTool(config)}__${t}`;
   // File permission rules are Edit(...) rules; they cover the Write tool too. ToolSearch loads deferred MCP tools.
-  const allowed = [...SLACK_READ.map(slack), ...CHROME_READ.map(chrome), `Edit(/${outDir}/slack.json)`, `Edit(/${outDir}/teams.json)`];
+  const allowed = [...SLACK_READ.map(slack), `Edit(/${outDir}/slack.json)`];
   return ['-p', '--model', config.model, '--permission-mode', 'dontAsk', '--tools', 'Write,ToolSearch', '--allowedTools', allowed.join(','),
-    '--disallowedTools', [...SLACK_WRITE.map(slack), ...CHROME_WRITE.map(chrome)].join(','),
-    ...(config.chromeMcp ? ['--mcp-config', path.join(outDir, 'mcp.json')] : []),
+    '--disallowedTools', SLACK_WRITE.map(slack).join(','),
     '--no-session-persistence', '--disable-slash-commands', '--output-format', 'text'];
 };
-
-// chromeMcp, when set, is a dedicated MCP server definition for the browser that holds the Teams tab.
-const chromeTool = (config) => (config.chromeMcp ? 'mcp__radar-chrome' : config.tools.chrome);
 
 const render = (template, values) => template.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in values ? values[k] : m));
 
@@ -59,11 +51,9 @@ const prepare = (home, { now = new Date(), anyTime = false } = {}) => {
     SLACK_USER_ID: config.slackUserId, AFTER_UNIX: String(after), LOOKBACK_HOURS: String(config.lookbackHours),
     DENY_CHANNELS: JSON.stringify(config.deny.channels), DENY_SENDERS: JSON.stringify(config.deny.senders),
     TRACKED: tracked.length ? tracked.map((t) => `- ${t.key} -> taskIds ${JSON.stringify(t.taskIds)}`).join('\n') : '- (none)',
-    SLACK_OUT: path.join(outDir, 'slack.json'), TEAMS_OUT: path.join(outDir, 'teams.json'), TEAMS_SCRIPT: path.join(outDir, 'teams-read.js'),
-    SLACK_TOOL: config.tools.slack, CHROME_TOOL: chromeTool(config),
+    SLACK_OUT: path.join(outDir, 'slack.json'), SLACK_TOOL: config.tools.slack,
   });
-  const mcp = config.chromeMcp ? { mcpServers: { 'radar-chrome': config.chromeMcp } } : null;
-  return { prompt, mcp, args: claudeArgs(config, outDir), timeoutSeconds: config.timeoutSeconds, outDir };
+  return { prompt, args: claudeArgs(config, outDir), timeoutSeconds: config.timeoutSeconds, outDir };
 };
 
 if (require.main === module) {
@@ -72,9 +62,6 @@ if (require.main === module) {
     if (!plan) process.exit(3);
     fs.mkdirSync(plan.outDir, { recursive: true });
     fs.writeFileSync(path.join(plan.outDir, 'prompt.txt'), plan.prompt);
-    // The browser MCP server only reads and writes inside the session's workspace roots, which run.sh sets to outDir.
-    fs.copyFileSync(path.join(__dirname, 'teams-read.js'), path.join(plan.outDir, 'teams-read.js'));
-    if (plan.mcp) fs.writeFileSync(path.join(plan.outDir, 'mcp.json'), JSON.stringify(plan.mcp));
     process.stdout.write([plan.timeoutSeconds, ...plan.args].map((a) => `${a}\0`).join(''));
   } catch (e) {
     console.error(`radar prepare failed: ${e.message}`);

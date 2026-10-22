@@ -77,7 +77,7 @@ What each button does:
 
 ## Chat radar
 
-A scheduled agent job ([`radar-producer/`](radar-producer/README.md)) reads Slack and Teams and writes `FM_HOME/data/radar.json`; the server cannot call MCP and only reads that file, on every `GET /api/radar`.
+A scheduled job ([`radar-producer/`](radar-producer/README.md)) reads Slack and Teams and writes `FM_HOME/data/radar.json`; the server cannot call MCP and only reads that file, on every `GET /api/radar`.
 Slack and Teams are equal, independent sources: each always gets its own status line, and a failed or out-of-date source never hides the other's items.
 
 - The radar lives on its own Radar tab (`#radar` or `#/radar`), next to the Board tab in the header; the selected tab is in the URL hash, so it survives a reload and the refresh cycle, and the tabs work with the arrow keys, Home, and End.
@@ -87,6 +87,7 @@ Slack and Teams are equal, independent sources: each always gets its own status 
 - An item needs `id` (`<source>:` plus 24 hex characters), `source`, `kind` (`mention`, `dm`, `group`, `channel`, `thread`, `new-channel`), `title` (120 characters), `why` (80), `firstSeen`, `lastActivity`, and `state`; an item missing any is dropped and counted in `invalidItems`.
 - Only the named fields are passed on (`who`, `where`, `link`, `snoozedUntil`, and optional `taskIds` too), so a message body in the file never reaches the page; a `link` that is not `http` or `https` becomes `null`.
 - A source reads as failed when `health` is `unavailable` (for example `Slack radar failed: login needed`) and as out of date when `readAt` is older than `maxAgeMinutes`.
+- A failed source may also carry `staleSince` (the first failed read since the last good one) and `needsSignIn: true` (the producer saw a sign-in, MFA, or account page); both are passed on by `GET /api/radar`, and the failed line already reads, for example, `Teams radar failed: needs sign-in: ...`.
 - Items whose `taskIds` name a task get a chat badge on that task's card.
 
 ```json

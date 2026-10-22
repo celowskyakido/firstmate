@@ -15,7 +15,7 @@ const RANK = { mention: 6, dm: 5, group: 4, thread: 3, channel: 2, 'new-channel'
 const DEFAULTS = {
   lookbackHours: 24, maxAgeMinutes: 90, deny: { channels: [], senders: [] },
   hours: { start: 8, end: 19, days: [1, 2, 3, 4, 5] }, model: 'sonnet', timeoutSeconds: 900,
-  tools: { slack: 'mcp__plugin_slack_slack', chrome: 'mcp__chrome-devtools' },
+  tools: { slack: 'mcp__plugin_slack_slack' },
 };
 
 const clip = (v, max) => (typeof v === 'string' && v.trim() ? (v.trim().length > max ? `${v.trim().slice(0, max - 1)}…` : v.trim()) : null);
@@ -67,7 +67,7 @@ const dedupe = (items) => [...items.reduce((byId, x) => {
 const readSource = (source, result, deny) => {
   if (result instanceof Error) return { health: 'unavailable', reason: result.message };
   if (!HEALTH.includes(result?.health)) return { health: 'unavailable', reason: clip(result?.reason, 120) ?? `${source} result has no valid health` };
-  if (result.health === 'unavailable') return { health: 'unavailable', reason: clip(result.reason, 120) ?? `${source} unavailable` };
+  if (result.health === 'unavailable') return { health: 'unavailable', reason: clip(result.reason, 120) ?? `${source} unavailable`, needsSignIn: result.needsSignIn === true };
   const mapped = (Array.isArray(result.items) ? result.items : []).map((x) => toItem(source, x, deny));
   const invalid = mapped.filter((x) => x === null).length;
   const health = invalid && result.health === 'ok' ? 'degraded' : result.health;
@@ -89,6 +89,8 @@ const merge = ({ previous, results, config, now = Date.now() }) => {
       health: read.health, reason: read.reason ?? null, readAt: fresh ? new Date(now).toISOString() : prevSource?.readAt ?? null,
       maxAgeMinutes: config.maxAgeMinutes, ...(read.cacheNewest ? { cacheNewest: read.cacheNewest } : {}),
       ...(fresh ? { counts: { items: read.items.length, invalidItems: read.invalid } } : {}),
+      // staleSince is the first failed read since the last good one; it stays put while the failures continue.
+      ...(fresh ? {} : { staleSince: prevSource?.staleSince ?? new Date(now).toISOString(), ...(read.needsSignIn ? { needsSignIn: true } : {}) }),
     };
     // A failed source keeps its previous items (shown as of the old readAt) rather than faking or dropping them.
     const carry = (x, p) => x && p && { ...x, firstSeen: p.firstSeen, state: p.state, snoozedUntil: p.snoozedUntil ?? null };
@@ -117,6 +119,7 @@ const run = (home, now = Date.now()) => {
   const check = radar.parseRadar(JSON.stringify(out), now);
   if (check.invalidItems) throw new Error(`refusing to write: ${check.invalidItems} item(s) fail fm-radar.v1`);
   const tmp = `${target}.${process.pid}.tmp`;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(tmp, `${JSON.stringify(out, null, 1)}\n`);
   fs.renameSync(tmp, target);
   return out;
