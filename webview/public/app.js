@@ -154,7 +154,7 @@
     return tabNodes.get(key);
   };
   const renderTabs = () => {
-    const list = R.tabs({ page: route(baseHash).page, snapshot, radar });
+    const list = R.tabs({ page: route(baseHash).page, snapshot, radar, agents: agentsOverview });
     list.forEach((t, i) => {
       const { node, label, count, warn } = tabParts(t.key);
       node.href = t.href;
@@ -569,6 +569,13 @@
     ].flat(Infinity).filter(Boolean);
   };
 
+  // ---- agents tab: overview and log panel live in agents-page.js ----
+  let agentsOverview = null;
+  const agentsPage = window.FleetAgents.create({
+    el, text, empty, token, copyText,
+    onChange: (overview) => { agentsOverview = overview; renderTabs(); if (view.contains(agentsPage.node)) agentsPage.render(); },
+  });
+
   // ---- routing ----
   const route = (hash = location.hash) => R.route(hash);
 
@@ -589,6 +596,7 @@
       if (page === 'board') renderBoard(isNavigation ? r.column : null);
       else if (page === 'waiting') view.replaceChildren(text('h2', 'Waiting for the fleet snapshot', { className: 'page-title' }), text('p', snapshotNote, { className: 'muted' }));
       else if (page === 'radar') { if (!view.contains(radarNode)) view.replaceChildren(radarNode); radarNode.replaceChildren(radarPage()); }
+      else if (page === 'agents') { if (view.contains(agentsPage.node)) agentsPage.render(); else { view.replaceChildren(agentsPage.node); agentsPage.show(); } }
       else view.replaceChildren(...[page === 'list' ? renderList(r.filter) : page === 'machine' ? renderMachine() : renderCharts()].flat());
       if (snapshot) document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
     } catch (e) {
@@ -712,7 +720,7 @@
         const focusKey = document.activeElement?.dataset?.key;
         kpiSlot.replaceChildren(kpiStrip());
         if (focusKey?.startsWith('tile:')) kpiSlot.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
-      } else if (!view.contains(radarNode)) renderBase();
+      } else if (!view.contains(radarNode) && !view.contains(agentsPage.node)) renderBase();
     } catch (e) {
       health.className = 'health health-error';
       health.textContent = `Machine check unavailable: ${e.message}`;
@@ -731,6 +739,7 @@
   refresh();
   refreshResources();
   refreshRadar();
+  agentsPage.refresh();
   setInterval(refresh, 3000);
   setInterval(refreshRadar, 15000);
   setInterval(refreshResources, 5000);

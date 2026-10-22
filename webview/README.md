@@ -68,6 +68,25 @@ Slack and Teams are equal, independent sources: each always gets its own status 
 
 Hidden items are left out of `GET /api/radar` and counted in `hiddenItems`; the producer's own `dismissed` state and a future `snoozedUntil` hide an item too.
 
+## Agents tab
+
+The Agents tab (`#agents` or `#/agents`) lists every agent process on this machine and opens a read-only log panel for each.
+Its badge counts running agents, and a red dot shows while any is stuck or needs input.
+
+- Counters at the top: Active, Needs input, Stuck or stale, and Idle, each with up to six reasons.
+- Firstmate workers: one row per `state/*.meta` record in the fleet snapshot, with kind, harness, model and effort (`model=` and `effort=` from the meta), backend and pane target, local copy, start time (from `spawn_gen=`), current state, the latest status line (shown as history), the last tool call, and time since the transcript last changed.
+- State comes only from the snapshot's `current_state` (the `bin/fm-crew-state.sh` reconciliation): an open `needs-decision`, a live captain hold, or `parked` is Needs input; `blocked`, `failed`, an open blocked event, a working task whose pane is gone, or one with no transcript output for 30 minutes is Stuck or stale; `working` is Active; anything else is Idle.
+- Other agent processes: `claude`, `codex`, `opencode`, `pi`, `omp`, `grok`, `kimi`, `cursor-agent`, `gemini`, `muse`, `devin`, `agy`, `amp`, `aider`, `goose`, `qwen`, `crush`, and `acli rovodev`, also when started through `node`, `bun`, `deno`, or `python`, found with one `ps` call and one `lsof -d cwd` call.
+  Each outermost agent is listed with its whole process subtree folded under it, so a headless run a session starts belongs to that session.
+- A process whose working folder is inside a worker's local copy is that worker; otherwise it is a no-mistakes pipeline run (a `no-mistakes` ancestor), a supervision host (`claude bg-pty-host`, `agents`, or `daemon`), a headless run (`-p`, `--print`, `--headless`, `exec`, or `run`), background (no terminal), the firstmate session of this home (its folder is `FM_HOME`), or an interactive session.
+- What it is doing: CPU across the subtree (2% or more is Active), Claude's own busy or idle flag from `~/.claude/sessions/<pid>.json` when present, the youngest child command, the last tool call, and when the transcript last changed.
+- Log panel: the pane through `bin/fm-peek.sh <id> <lines>` (so tmux, herdr, zellij, cmux, orca, and remote second mates use the existing capture), the status log tail, the current no-mistakes step log (`no-mistakes axi status` then `axi logs --step <step>` in the task's local copy, only when the task's state comes from a run), and the session transcript.
+  A non-fleet process shows only its transcript.
+- Transcripts: Claude's `~/.claude/projects/<folder>/<session>.jsonl` (the session id from the per-pid file, else the newest file for the folder, labelled as a guess when another session shares the folder) and Codex's `~/.codex/sessions/<date>/rollout-*.jsonl` from the last three days whose recorded cwd matches; each record becomes one short line (user, assistant, tool, result).
+- The panel has a filter box, 200, 500, or 1000 lines per source, an auto-scroll toggle, and a Copy button for the visible lines; it refreshes every 4 seconds while open, and the overview every 5 seconds while the tab is open (every 30 seconds otherwise, for the badge).
+- Anything missing (no snapshot yet, `ps`, `lsof`, `fm-peek`, `no-mistakes`, or a transcript) shows as unavailable with its reason; the rest of the tab keeps working.
+- Possible follow-up, deliberately absent: interrupt, exit, or steer controls; this tab never kills, sends keys, or writes anything.
+
 ## Run
 
 ```sh
@@ -113,7 +132,7 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 - `GET /api/resources` serves the latest resources reading with the same headers under the `X-Resources-` prefix.
 - `GET /api/history` returns `{windowMs, fleet, machine}`: timestamped samples of the headline counts and of machine load, memory in use, Claude sessions, MCP helpers, and stray helpers, with `null` for a reading that was not available.
 - `GET /api/task/<id>` adds the status-log tail (shown as history, never as current state) and the task's inbox listing. `<id>` must be a task in the current snapshot.
-- Pages: the Board with its detail drawer, Charts, card lists behind chart segments, and Machine.
+- Pages: the Board with its detail drawer, Radar, Agents, Charts, card lists behind chart segments, and Machine.
   Status logs are never re-folded here (see `docs/architecture.md`, status files are append-only event logs).
 - A snapshot whose `schema` is not `fm-fleet-snapshot.v1` is rejected by the server and the page, loudly, rather than rendered.
 
@@ -121,6 +140,9 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 
 - Binds `127.0.0.1` only; a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused (DNS rebinding).
   Do not bind `0.0.0.0`.
+- `GET /api/agents` and `GET /api/agents/log` return process and log data, which can hold secrets or PHI, so they also require the per-launch `X-Webview-Token`, send `Cache-Control: no-store` like every route, and are never cached to disk or written to the server log.
+  `agents.js` builds the process allowlist from a process table at most 3 seconds old and the task allowlist from the snapshot: `task` must be a snapshot task id, `pid` must be a current agent process, `lines` is a positive whole number clamped to 1000, and paths are built only from `FM_HOME/state/<id>.status`, fixed `~/.claude` and `~/.codex` roots, a validated session id, and a sanitised folder name.
+  `agent-logs.js` runs `ps`, `lsof`, `fm-peek.sh` (with `FM_GUARD_READ_ONLY=1`, so it never consumes firstmate's watcher-down banner), and `no-mistakes` with argument arrays and 3 to 8 second timeouts, and masks AWS keys, bearer and authorization values, GitHub, Slack, and API keys, JWTs, URL passwords, private key blocks, and `password=`-style values before any text leaves the server; the panel says logs may still contain sensitive data.
 - Every route is `GET`/`HEAD` only, except three that accept only `POST`: `POST /api/stray-helpers/<pid>/kill`, `POST /api/cancel`, and `POST /api/radar/<id>/dismiss|snooze`.
   The radar writes carry the same Origin, per-launch token, and JSON-only guards as the stop request below, and accept only a well-formed item id.
   There is no generic kill endpoint and no request field names a command, script, or signal.

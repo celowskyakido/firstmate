@@ -485,9 +485,9 @@
     })),
   });
 
-  // What a page can show right now. Only the Machine page works without a fleet
-  // snapshot, because it reads the machine directly; the rest wait for the snapshot.
-  const viewFor = (page, { hasSnapshot }) => (page === 'machine' || page === 'radar' || hasSnapshot ? page : 'waiting');
+  // What a page can show right now. Machine, Radar, and Agents read their own sources,
+  // so they work without a fleet snapshot; the rest wait for the snapshot.
+  const viewFor = (page, { hasSnapshot }) => (['machine', 'radar', 'agents'].includes(page) || hasSnapshot ? page : 'waiting');
 
   // The Machine page's line before its first reading arrives.
   const machineStatus = ({ resources, error }) => (resources ? null
@@ -559,15 +559,15 @@
     return map;
   };
 
-  // '#radar' and '#/radar' both open the Radar tab; unknown hashes fall back to the board.
+  // '#radar' and '#/radar' both open the Radar tab, and the same for Agents; unknown hashes fall back to the board.
   const route = (hash) => {
     const [path, query = ''] = hash.slice(1).split('?');
     const [, page, ...rest] = path.split('/');
     if (page === 'card' && rest[0]) return { page: 'card', key: decodeURIComponent(rest.join('/')) };
     if (page === 'task' && rest[0]) return { page: 'card', key: `task:${decodeURIComponent(rest[0])}` };
     if (page === 'list' && rest.length) return { page, filter: rest.join('/') };
-    if (page === 'machine' || page === 'charts' || page === 'radar') return { page };
-    if (path === 'radar') return { page: 'radar' };
+    if (['machine', 'charts', 'radar', 'agents'].includes(page)) return { page };
+    if (path === 'radar' || path === 'agents') return { page: path };
     return { page: 'board', column: rest[0] ?? null, params: new URLSearchParams(query) };
   };
 
@@ -583,21 +583,31 @@
     };
   };
 
-  // Tab bar over the two main views; Charts and Machine stay plain links, so neither tab is selected there.
-  const tabs = ({ page, snapshot, radar }) => {
+  // The Agents tab's badge counts fleet workers and other agent processes; its dot shows while any is stuck or needs input.
+  const agentsTab = (overview) => {
+    const c = overview?.counters;
+    const attention = c ? c.stuck.count + c['needs-input'].count : 0;
+    return { count: c ? overview.fleet.length + overview.others.length : null, hasWarning: attention > 0, attention };
+  };
+
+  // Tab bar over the main views; Charts and Machine stay plain links, so no tab is selected there.
+  const tabs = ({ page, snapshot, radar, agents }) => {
     const rt = radarTab(radar);
+    const at = agentsTab(agents);
     const needsYou = snapshot ? fleetCounts(snapshot).needsYou : null;
     return [
       { key: 'board', label: 'Board', href: '#/board', count: needsYou, hasWarning: false, isSelected: page === 'board',
         description: needsYou == null ? 'Board' : `Board, ${needsYou} need${needsYou === 1 ? 's' : ''} you` },
       { key: 'radar', label: 'Radar', href: '#radar', count: rt.count, hasWarning: rt.hasWarning, isSelected: page === 'radar',
         description: `Radar, ${rt.count} item${rt.count === 1 ? '' : 's'}${rt.hasWarning ? ', a chat source has a problem' : ''}` },
+      { key: 'agents', label: 'Agents', href: '#agents', count: at.count, hasWarning: at.hasWarning, isSelected: page === 'agents',
+        description: at.count == null ? 'Agents' : `Agents, ${at.count} listed${at.attention ? `, ${at.attention} stuck or need${at.attention === 1 ? 's' : ''} input` : ''}` },
     ];
   };
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
     cards, cardRegistry, cancelPlan, isCancellable, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
-    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask, radarTab, tabs, route,
+    duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask, radarTab, agentsTab, tabs, route,
   };
 });

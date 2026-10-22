@@ -131,7 +131,7 @@ test('client refuses a foreign snapshot schema', () => {
 });
 
 test('client code never uses HTML-injecting sinks', () => {
-  for (const f of ['app.js', 'render.js', 'charts.js', 'theme.js']) {
+  for (const f of ['app.js', 'render.js', 'charts.js', 'theme.js', 'agents-page.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
     assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/, f);
   }
