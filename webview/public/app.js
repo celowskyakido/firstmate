@@ -440,43 +440,53 @@
     registry = new Map([...registry].filter(([, c]) => !isHidden(c)));
   };
 
-  const confirmCancel = (c, plan) => new Promise((resolve) => {
+  // One dialog for every "say why" or "pick a day" confirmation, single or in bulk.
+  // It resolves with the validated choice, or null when the captain keeps things as they are.
+  const confirmChoice = ({ heading, intro, titles = [], mode, yes, no = 'Keep it', legend = 'Why cancel it?' }) => new Promise((resolve) => {
     let choice = null;
     const problem = el('p', { className: 'problem', role: 'alert', hidden: true });
+    const shown = titles.slice(0, 10);
+    const list = titles.length > 1 ? el('ul', { className: 'confirm-titles' }, shown.map((t) => text('li', t)),
+      titles.length > shown.length ? text('li', `and ${titles.length - shown.length} more`, { className: 'muted' }) : '') : '';
+    const note = el('input', { type: 'text', maxLength: R.CANCEL_NOTE_MAX, className: 'note', id: 'cancel-note' });
+    const date = el('input', { type: 'date', className: 'note', id: 'defer-date', min: R.localDate(new Date(Date.now() + DAY_MS)), max: R.localDate(new Date(Date.now() + R.DEFER_MAX_DAYS * DAY_MS)) });
     const radios = R.CANCEL_REASONS.map(([value, label]) => el('label', { className: 'reason' },
       el('input', { type: 'radio', name: 'cancel-reason', value }), text('span', label)));
-    const note = el('input', { type: 'text', maxLength: R.CANCEL_NOTE_MAX, className: 'note', id: 'cancel-note' });
-    const keep = el('button', { type: 'button', className: 'close', textContent: 'Keep it', onclick: () => confirmBox.close() });
+    const controls = mode === 'date'
+      ? [el('label', { className: 'note-label', htmlFor: 'defer-date' }, legend), date, deferQuickPicks((value) => { date.value = value; })]
+      : [el('fieldset', { className: 'reasons' }, text('legend', legend), radios),
+        el('label', { className: 'note-label', htmlFor: 'cancel-note' }, `Short note (required for Other, up to ${R.CANCEL_NOTE_MAX} characters)`), note];
+    const keep = el('button', { type: 'button', className: 'close', textContent: no, onclick: () => confirmBox.close() });
     const submit = () => {
-      const picked = R.cancelReason({ reason: confirmBox.querySelector('input[name="cancel-reason"]:checked')?.value, note: note.value });
+      const picked = mode === 'date' ? R.deferDate(date.value)
+        : R.cancelReason({ reason: confirmBox.querySelector('input[name="cancel-reason"]:checked')?.value, note: note.value });
       if (picked.error) {
-        problem.textContent = `Cannot cancel yet: ${picked.error}.`;
+        problem.textContent = `Cannot continue yet: ${picked.error}.`;
         problem.hidden = false;
         return;
       }
-      choice = { reason: picked.reason, note: picked.note };
+      choice = mode === 'date' ? { until: picked.until } : { reason: picked.reason, note: picked.note };
       confirmBox.close();
     };
-    confirmBox.replaceChildren(
-      text('h2', `Cancel "${c.title}"?`, { id: 'confirm-title' }),
-      text('p', `${plan.effect} Use this for an item that is outdated or already handled.`, { className: 'muted' }),
-      el('fieldset', { className: 'reasons' }, text('legend', 'Why cancel it?'), radios),
-      el('label', { className: 'note-label', htmlFor: 'cancel-note' }, `Short note (required for Other, up to ${R.CANCEL_NOTE_MAX} characters)`), note,
-      problem,
-      el('div', { className: 'confirm-actions' }, keep, el('button', { type: 'button', className: 'danger', textContent: 'Cancel it', onclick: submit })));
+    confirmBox.replaceChildren(text('h2', heading, { id: 'confirm-title' }), text('p', intro, { className: 'muted' }), list, ...controls, problem,
+      el('div', { className: 'confirm-actions' }, keep, el('button', { type: 'button', className: 'danger', textContent: yes, onclick: submit })));
     confirmBox.addEventListener('close', () => resolve(choice), { once: true });
     confirmBox.showModal();
-    radios[0].querySelector('input').focus();
+    (mode === 'date' ? date : radios[0].querySelector('input')).focus();
+  });
+  const confirmCancel = (c, plan) => confirmChoice({
+    heading: `Cancel "${c.title}"?`, intro: `${plan.effect} Use this for an item that is outdated or already handled.`, mode: 'reason', yes: 'Cancel it',
   });
 
-  const postCancel = async (body) => {
+  const postJson = async (route, body) => {
     try {
-      const res = await fetch('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webview-Token': token }, body: JSON.stringify(body) });
+      const res = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webview-Token': token }, body: JSON.stringify(body) });
       return await res.json().catch(() => ({ outcome: 'failed', reason: `HTTP ${res.status}` }));
     } catch (e) {
       return { outcome: 'failed', reason: `could not reach the web view server: ${e.message}` };
     }
   };
+  const postCancel = (body) => postJson('/api/cancel', body);
 
   const cancelCard = async (c) => {
     const plan = R.cancelPlan(snapshot, c.id);
@@ -501,6 +511,274 @@
     ? el('button', { type: 'button', className: `danger ${size}`.trim(), textContent: 'Cancel', key: `cancel:${size}:${c.key}`, disabled: isCancelBusy,
       aria: { label: `Cancel ${c.title}` }, onclick: () => cancelCard(c) })
     : '');
+
+  // ---- decisions tab: answer, defer, or close, one at a time or in bulk; every request is guarded again on the server ----
+  const DAY_MS = 86400 * 1000;
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  const deferQuickPicks = (setDate) => el('div', { className: 'quick-picks' },
+    [['Tomorrow', 1], ['In a week', 7], ['In a month', 30]].map(([label, days]) => el('button', { type: 'button', className: 'small', textContent: label,
+      onclick: () => setDate(R.localDate(new Date(Date.now() + days * DAY_MS))) })));
+
+  const decisionRows = new Map();
+  const groupHeads = new Map();
+  const selected = new Set();
+  // ref -> { tone, text, isDone, at }: the inline result under each decision.
+  const outcomes = new Map();
+  // What this page did, newest first. Kept until the page is reloaded; an undo works while the server keeps running.
+  const recent = [];
+  let isDecisionBusy = false;
+  let recentId = 0;
+
+  const decisionsNode = el('div', { className: 'decisions-page' });
+  const decisionsTitle = text('h2', 'Decisions', { className: 'page-title' });
+  const decisionsNote = text('p', '', { className: 'muted' });
+  const selectAll = el('input', { type: 'checkbox', name: 'select-all', id: 'select-all', key: 'select-all' });
+  const selectedCount = text('span', '', { className: 'muted', aria: { live: 'polite' } });
+  const bulkSettle = el('button', { type: 'button', className: 'danger small', key: 'bulk-settle', textContent: 'Close as settled…', onclick: () => bulkRun('settle') });
+  const bulkDefer = el('button', { type: 'button', className: 'small', key: 'bulk-defer', textContent: 'Defer…', onclick: () => bulkRun('defer') });
+  const bulkBar = el('div', { className: 'bulk-bar', role: 'group', aria: { label: 'Act on several decisions' } },
+    el('label', { className: 'select-all' }, selectAll, ' Select all'), selectedCount, bulkSettle, bulkDefer);
+  const recentBox = el('section', { className: 'panel recent', hidden: true, aria: { label: 'Recent actions' } });
+  const decisionList = el('div', { className: 'decision-list' });
+  decisionsNode.append(decisionsTitle, decisionsNote, bulkBar, recentBox, decisionList);
+
+  const addRecent = (entry) => {
+    recent.unshift({ id: ++recentId, refs: [], ...entry });
+    recent.length = Math.min(recent.length, 30);
+  };
+  // Records the inline result for one decision and the line in Recent actions.
+  const settleOutcome = (item, action, result) => {
+    const line = R.resultLine(action, result, item);
+    outcomes.set(item.ref, { ...line, isDone: line.tone === 'ok', at: Date.now() });
+    if (line.tone === 'ok') selected.delete(item.ref);
+    return line;
+  };
+  const runBusy = async (work, pendingItems = []) => {
+    pendingItems.forEach((i) => outcomes.set(i.ref, { tone: 'info', text: 'Working… this can take several seconds.' }));
+    isDecisionBusy = true;
+    renderDecisions();
+    try { return await work(); } finally { isDecisionBusy = false; renderDecisions(); }
+  };
+  const currentItems = () => R.decisionItems(snapshot).items;
+
+  const answerRow = (row) => runBusy(async () => {
+    const { item } = row;
+    const body = { action: 'answer', ref: item.ref, ...(row.option ? { option: row.option } : { text: row.text.value }), ...(item.needsMode ? { mode: row.mode.value } : {}) };
+    const line = settleOutcome(item, 'answer', await postJson('/api/decisions/act', body));
+    addRecent({ tone: line.tone, text: `${item.title}: ${line.text}` });
+  }, [row.item]);
+  const deferRow = (row) => runBusy(async () => {
+    const { item } = row;
+    const date = R.deferDate(row.date.value);
+    if (date.error) { outcomes.set(item.ref, { tone: 'error', text: `Could not defer: ${date.error}.` }); return; }
+    const line = settleOutcome(item, 'defer', await postJson('/api/decisions/act', { action: 'defer', ref: item.ref, until: date.until }));
+    addRecent({ tone: line.tone, text: `${item.title}: ${line.text}`, refs: line.tone === 'ok' ? [item.ref] : [] });
+  }, [row.item]);
+  const settleRow = async (row) => {
+    const { item } = row;
+    const choice = await confirmChoice({ heading: `Close "${item.title}" as settled?`, intro: R.effectOf(item, 'settle'), mode: 'reason', yes: 'Close it', legend: 'Why is it settled?' });
+    if (!choice) return;
+    await runBusy(async () => {
+      const line = settleOutcome(item, 'settle', await postJson('/api/decisions/act', { action: 'settle', ref: item.ref, ...choice }));
+      addRecent({ tone: line.tone, text: `${item.title}: ${line.text}` });
+    }, [item]);
+  };
+
+  const BULK_WORDS = {
+    settle: { heading: (n) => `Close ${plural(n, 'decision')} as settled?`, yes: (n) => `Close ${n}`, legend: 'Why are they settled?', mode: 'reason', cannot: 'closed', done: 'Closed',
+      effect: 'Closes them as settled, with your reason recorded on each. This cannot be undone from here.' },
+    defer: { heading: (n) => `Defer ${plural(n, 'decision')}?`, yes: (n) => `Defer ${n}`, legend: 'Defer them until', mode: 'date', cannot: 'deferred', done: 'Deferred',
+      effect: 'Hides them until the day you pick. You can undo it from Recent actions.' },
+  };
+  const bulkRun = async (action) => {
+    const items = currentItems().filter((i) => selected.has(i.ref));
+    const eligible = items.filter((i) => i.actions[action]);
+    if (!eligible.length) return;
+    const words = BULK_WORDS[action];
+    const skipped = items.length - eligible.length;
+    const choice = await confirmChoice({
+      heading: words.heading(eligible.length), mode: words.mode, yes: words.yes(eligible.length), legend: words.legend, titles: eligible.map((i) => i.title),
+      intro: `${words.effect}${skipped ? ` ${plural(skipped, 'selected decision')} cannot be ${words.cannot} this way and ${skipped === 1 ? 'is' : 'are'} left alone.` : ''}`,
+    });
+    if (!choice) return;
+    await runBusy(async () => {
+      const refs = eligible.map((i) => i.ref);
+      const result = await postJson('/api/decisions/bulk', { action, refs, count: refs.length, ...choice });
+      const byRef = new Map((result.results ?? []).map((r) => [r.ref, r]));
+      if (!result.results) {
+        const line = R.resultLine(action, result);
+        addRecent({ tone: 'error', text: `${words.done} none of ${refs.length}: ${line.text}` });
+        return;
+      }
+      eligible.forEach((item) => settleOutcome(item, action, byRef.get(item.ref) ?? { outcome: 'failed', reason: 'no result came back for it' }));
+      const isFailed = (i) => ['refused', 'failed', undefined].includes(byRef.get(i.ref)?.outcome);
+      const failures = eligible.filter(isFailed).map((i) => `${i.title} (${byRef.get(i.ref)?.reason ?? 'no result came back'}${byRef.get(i.ref)?.output ? `: ${byRef.get(i.ref).output}` : ''})`);
+      addRecent({ tone: failures.length ? 'error' : 'ok', text: `${words.done} ${result.done} of ${refs.length}.${failures.length ? ` Not done: ${failures.join('; ')}.` : ''}`,
+        refs: action === 'defer' ? eligible.filter((i) => !isFailed(i)).map((i) => i.ref) : [] });
+    }, eligible);
+  };
+
+  // Holds the same reason again with no date, which is exactly what clears a deferral.
+  const undoEntry = (entry) => runBusy(async () => {
+    const refs = [...entry.refs];
+    const result = refs.length === 1 ? await postJson('/api/decisions/act', { action: 'undo-defer', ref: refs[0] })
+      : await postJson('/api/decisions/bulk', { action: 'undo-defer', refs, count: refs.length });
+    const results = result.results ?? [{ ref: refs[0], ...result }];
+    const undone = results.filter((r) => r.outcome === 'undone').map((r) => r.ref);
+    undone.forEach((ref) => outcomes.delete(ref));
+    entry.refs = refs.filter((ref) => !undone.includes(ref));
+    const failed = results.filter((r) => r.outcome !== 'undone');
+    entry.undoNote = failed.length ? `Could not undo ${plural(failed.length, 'deferral')}: ${failed.map((r) => `${r.reason ?? r.outcome}${r.output ? ` ${r.output}` : ''}`).join('; ')}.` : 'Undone: back on your list.';
+    entry.undoTone = failed.length ? 'error' : 'ok';
+  });
+
+  const reconcile = (parent, nodes) => {
+    nodes.forEach((node, i) => { if (parent.children[i] !== node) parent.insertBefore(node, parent.children[i] ?? null); });
+    while (parent.children.length > nodes.length) parent.lastElementChild.remove();
+  };
+
+  // A row is built once and updated in place, so typing, the chosen option, and focus survive every refresh.
+  const makeRow = (ref) => {
+    const row = { ref, item: null, option: null, optionSignature: '', optionButtons: [] };
+    row.select = el('input', { type: 'checkbox', name: 'select', key: `select:${ref}`, onchange: () => { if (row.select.checked) selected.add(ref); else selected.delete(ref); renderDecisions(); } });
+    row.title = el('a', { className: 'decision-title', key: `decision:${ref}` });
+    row.meta = el('div', { className: 'card-meta' });
+    row.summary = el('p', { className: 'decision-summary' });
+    row.optionBox = el('div', { className: 'options', role: 'group', aria: { label: 'Listed options' } });
+    row.text = el('textarea', { name: 'answer', rows: 2, maxLength: R.ANSWER_MAX, className: 'answer-text', key: `answer:${ref}`, placeholder: 'Or write your answer', oninput: () => { row.option = null; renderDecisions(); } });
+    row.mode = el('select', { name: 'after-answer', className: 'mode', key: `mode:${ref}`, aria: { label: 'What happens after you answer' }, onchange: () => renderDecisions() },
+      el('option', { value: '', textContent: 'After answering…' }), el('option', { value: 'done', textContent: 'Close the question' }), el('option', { value: 'release', textContent: 'Let the held work go ahead' }));
+    row.send = el('button', { type: 'button', className: 'primary small', textContent: 'Send answer', key: `send:${ref}`, onclick: () => answerRow(row) });
+    row.answerEffect = text('p', '', { className: 'effect', aria: { live: 'polite' } });
+    row.date = el('input', { type: 'date', name: 'defer-until', className: 'defer-date', key: `date:${ref}`, aria: { label: 'Defer until' }, oninput: () => renderDecisions() });
+    row.defer = el('button', { type: 'button', className: 'small', textContent: 'Defer', key: `defer:${ref}`, onclick: () => deferRow(row) });
+    row.deferEffect = text('p', '', { className: 'effect', aria: { live: 'polite' } });
+    row.settle = el('button', { type: 'button', className: 'danger small', textContent: 'Close as settled…', key: `settle:${ref}`, onclick: () => settleRow(row) });
+    row.settleEffect = text('p', '', { className: 'effect' });
+    row.readOnly = text('p', '', { className: 'muted' });
+    row.result = el('p', { role: 'status' });
+    row.answerBox = el('div', { className: 'answer-box' }, row.optionBox, row.text, row.mode, row.send, row.answerEffect);
+    row.deferBox = el('div', { className: 'defer-box' }, row.date, deferQuickPicks((value) => { row.date.value = value; renderDecisions(); }), row.defer, row.deferEffect);
+    row.settleBox = el('div', { className: 'settle-box' }, row.settle, row.settleEffect);
+    row.node = el('article', { className: 'decision card tone-needs' }, el('div', { className: 'decision-head' }, row.select, row.title), row.meta, row.summary,
+      row.answerBox, row.readOnly, row.deferBox, row.settleBox, row.result);
+    return row;
+  };
+
+  const syncOptions = (row, item) => {
+    const signature = item.options.map((o) => `${o.label}\u0001${o.text}`).join('\u0002');
+    if (signature !== row.optionSignature) {
+      row.optionSignature = signature;
+      if (!item.options.some((o) => o.label === row.option)) row.option = null;
+      row.optionButtons = item.options.map((o) => el('button', { type: 'button', className: 'option small', key: `option:${row.ref}:${o.label}`, textContent: `${o.label}  ${o.text}`,
+        onclick: () => { row.option = row.option === o.label ? null : o.label; if (row.option) row.text.value = ''; renderDecisions(); } }));
+      row.optionBox.replaceChildren(...row.optionButtons);
+    }
+    row.optionButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(row.option === item.options[i].label)));
+    row.optionBox.hidden = !item.options.length;
+  };
+
+  const updateRow = (row, item) => {
+    row.item = item;
+    const outcome = outcomes.get(item.ref);
+    const isDone = Boolean(outcome?.isDone);
+    const isLocked = isDecisionBusy || isDone;
+    row.title.textContent = item.title;
+    row.title.href = item.cardKey ? `#/card/${encodeURIComponent(item.cardKey)}` : '#/decisions';
+    row.title.title = 'Open the full detail';
+    row.meta.replaceChildren(text('span', R.projectName(item.project), { className: 'chip' }),
+      item.ageSeconds != null ? text('span', R.duration(item.ageSeconds), { className: `age${item.isAging ? ' age-old' : ''}`, title: `Waiting on you for ${R.duration(item.ageSeconds)}` }) : '',
+      text('span', R.PRIORITY_LABELS[item.priority], { className: 'badge' }),
+      item.collapsed ? text('span', `${plural(item.collapsed + 1, 'record')} folded into one`, { className: 'badge', title: 'Twin records of this decision are shown once' }) : '');
+    row.summary.textContent = item.summary;
+    row.node.classList.toggle('is-done', isDone);
+    const canBulk = item.actions.defer || item.actions.settle;
+    row.select.hidden = !canBulk;
+    row.select.checked = selected.has(item.ref);
+    row.select.disabled = isLocked;
+    row.select.setAttribute('aria-label', `Select ${item.title}`);
+
+    const { answer } = item.actions;
+    row.answerBox.hidden = !answer;
+    row.readOnly.hidden = Boolean(answer);
+    row.readOnly.textContent = item.actions.readOnly ?? '';
+    if (answer) {
+      syncOptions(row, item);
+      row.mode.hidden = !item.needsMode;
+      const hasAnswer = Boolean(row.option) || row.text.value.trim().length > 0;
+      row.text.disabled = isLocked;
+      row.mode.disabled = isLocked;
+      row.optionButtons.forEach((b) => { b.disabled = isLocked; });
+      row.send.disabled = isLocked || !hasAnswer || (item.needsMode && !row.mode.value);
+      row.send.textContent = answer.type === 'relay' ? 'Send to the worker' : 'Send answer';
+      row.answerEffect.textContent = R.effectOf(item, 'answer', { mode: row.mode.value });
+    }
+    row.deferBox.hidden = !item.actions.defer;
+    row.date.min = R.localDate(new Date(Date.now() + DAY_MS));
+    row.date.disabled = isLocked;
+    row.defer.disabled = isLocked || !row.date.value;
+    row.deferEffect.textContent = R.effectOf(item, 'defer', { until: R.deferDate(row.date.value).until });
+    row.settleBox.hidden = !item.actions.settle;
+    row.settle.disabled = isLocked;
+    row.settleEffect.textContent = R.effectOf(item, 'settle');
+    row.result.hidden = !outcome;
+    row.result.textContent = outcome?.text ?? '';
+    row.result.className = outcome ? { ok: 'result-ok', error: 'problem' }[outcome.tone] ?? 'muted' : '';
+  };
+
+  const renderRecent = () => {
+    recentBox.hidden = !recent.length;
+    recentBox.replaceChildren(text('h3', 'Recent actions'), text('p', 'Kept until you reload this page. A deferral can be undone here; an answer or a close cannot.', { className: 'subtitle' }),
+      el('ul', { className: 'recent-list' }, recent.map((e) => el('li', { className: e.tone === 'ok' ? 'result-ok' : 'problem' }, text('span', e.text),
+        e.refs.length ? el('button', { type: 'button', className: 'small', textContent: e.refs.length === 1 ? 'Undo' : `Undo ${e.refs.length}`, key: `undo:${e.id}`, disabled: isDecisionBusy, onclick: () => undoEntry(e) }) : '',
+        e.undoNote ? text('span', ` ${e.undoNote}`, { className: e.undoTone === 'ok' ? 'muted' : 'problem' }) : ''))));
+  };
+
+  const renderDecisions = () => {
+    if (!snapshot) return;
+    const { items, collapsed } = R.decisionItems(snapshot);
+    const live = new Set(items.map((i) => i.ref));
+    selected.forEach((ref) => { if (!live.has(ref)) selected.delete(ref); });
+    decisionRows.forEach((_, ref) => { if (!live.has(ref)) decisionRows.delete(ref); });
+    // A newer snapshot that still lists a decision is the proof that the action did not take, so it becomes actionable again.
+    outcomes.forEach((o, ref) => { if (o.isDone && Date.parse(snapshot.generated) > o.at) outcomes.delete(ref); });
+    decisionsTitle.textContent = `Decisions (${items.length})`;
+    decisionsNote.textContent = collapsed ? `${plural(collapsed, 'duplicate record')} folded into the entries below.` : '';
+    decisionsNote.hidden = !collapsed;
+    const nodes = [];
+    let lastPriority = -1;
+    items.forEach((item) => {
+      if (item.priority !== lastPriority) {
+        lastPriority = item.priority;
+        if (!groupHeads.has(item.priority)) groupHeads.set(item.priority, text('h3', '', { className: 'group-head' }));
+        const head = groupHeads.get(item.priority);
+        head.textContent = `${R.PRIORITY_LABELS[item.priority]} (${items.filter((i) => i.priority === item.priority).length})`;
+        nodes.push(head);
+      }
+      if (!decisionRows.has(item.ref)) decisionRows.set(item.ref, makeRow(item.ref));
+      const row = decisionRows.get(item.ref);
+      updateRow(row, item);
+      nodes.push(row.node);
+    });
+    if (!items.length) nodes.push(empty('Nothing is waiting on you.'));
+    reconcile(decisionList, nodes);
+
+    const pickable = items.filter((i) => (i.actions.defer || i.actions.settle) && !outcomes.get(i.ref)?.isDone);
+    const chosen = items.filter((i) => selected.has(i.ref));
+    selectAll.disabled = isDecisionBusy || !pickable.length;
+    selectAll.checked = Boolean(pickable.length) && pickable.every((i) => selected.has(i.ref));
+    selectAll.indeterminate = !selectAll.checked && chosen.length > 0;
+    selectedCount.textContent = chosen.length ? `${chosen.length} selected` : 'Select decisions to close or defer several at once.';
+    bulkSettle.disabled = isDecisionBusy || !chosen.some((i) => i.actions.settle);
+    bulkDefer.disabled = isDecisionBusy || !chosen.some((i) => i.actions.defer);
+    bulkBar.hidden = !pickable.length;
+    renderRecent();
+  };
+  selectAll.addEventListener('change', () => {
+    const pickable = currentItems().filter((i) => (i.actions.defer || i.actions.settle) && !outcomes.get(i.ref)?.isDone);
+    if (selectAll.checked) pickable.forEach((i) => selected.add(i.ref)); else selected.clear();
+    renderDecisions();
+  });
 
   // ---- detail drawer ----
   const copyText = async (value) => {
@@ -548,7 +826,7 @@
         c.blockers.ids.length ? el('p', {}, 'Waiting on ', c.blockers.ids.map((id, i) => [i ? ', ' : '', blockerLink(id)])) : '',
         c.blockers.reason ? text('p', c.blockers.reason, { className: 'muted' }) : '') : '',
       c.resolve.length ? el('section', { className: 'detail-block resolve' }, text('h3', 'How to resolve it'),
-        text('p', 'Apart from Cancel, nothing runs from this page. Copy a reply for firstmate, or the command it would run.', { className: 'muted' }),
+        text('p', 'Apart from Cancel and the Decisions tab, nothing runs from this page. Copy a reply for firstmate, or the command it would run.', { className: 'muted' }),
         c.resolve.map(copyRow)) : '',
       el('dl', {},
         c.stateDetail ? row('Latest status', c.stateDetail) : '',
@@ -597,6 +875,7 @@
       else if (page === 'waiting') view.replaceChildren(text('h2', 'Waiting for the fleet snapshot', { className: 'page-title' }), text('p', snapshotNote, { className: 'muted' }));
       else if (page === 'radar') { if (!view.contains(radarNode)) view.replaceChildren(radarNode); radarNode.replaceChildren(radarPage()); }
       else if (page === 'agents') { if (view.contains(agentsPage.node)) agentsPage.render(); else { view.replaceChildren(agentsPage.node); agentsPage.show(); } }
+      else if (page === 'decisions') { if (!view.contains(decisionsNode)) view.replaceChildren(decisionsNode); renderDecisions(); }
       else view.replaceChildren(...[page === 'list' ? renderList(r.filter) : page === 'machine' ? renderMachine() : renderCharts()].flat());
       if (snapshot) document.title = `Firstmate (${R.fleetCounts(snapshot).needsYou} need you)`;
     } catch (e) {
@@ -720,7 +999,7 @@
         const focusKey = document.activeElement?.dataset?.key;
         kpiSlot.replaceChildren(kpiStrip());
         if (focusKey?.startsWith('tile:')) kpiSlot.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus();
-      } else if (!view.contains(radarNode) && !view.contains(agentsPage.node)) renderBase();
+      } else if (!view.contains(radarNode) && !view.contains(agentsPage.node) && !view.contains(decisionsNode)) renderBase();
     } catch (e) {
       health.className = 'health health-error';
       health.textContent = `Machine check unavailable: ${e.message}`;

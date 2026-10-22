@@ -9,7 +9,7 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
 - The Machine page reads only the machine, so it, the sessions list, and the stray-helper controls work while the fleet snapshot is still loading or failing; the other pages say they are waiting for the snapshot.
 - The Charts page shows every card by state, open work by project, how long waiting items have sat, and machine trends; the Machine page holds machine figures, trends, Claude sessions, and stray helpers, with a header health badge and plain-language machine alerts.
 - Light and dark themes follow the operating system by default; the header toggle cycles system, light, and dark and remembers the choice in `localStorage`.
-- Apart from stopping stray helpers on the Machine page and cancelling outdated items (below), and dismissing or snoozing chat radar items, the page only reads: it never otherwise answers a decision, holds, merges, or sends anything.
+- Apart from stopping stray helpers on the Machine page, cancelling outdated items and acting on decisions (both below), and dismissing or snoozing chat radar items, the page only reads: it never otherwise holds, merges, or sends anything.
 
 ## Cancelling outdated decisions and tasks
 
@@ -19,7 +19,45 @@ It adds no fleet logic: it caches `bin/fm-fleet-snapshot.sh --json` and renders 
   Both run with `FM_HOME` set and an argument array; the page never edits the backlog itself.
 - A successful cancel hides the card at once and the next snapshot drops it; a refusal or script failure is shown with its reason and the script's output.
 - Every attempt, refused or not, appends one JSON line (`at`, `id`, `reason`, `note`, `outcome`) to `$FM_HOME/state/webview-cancel.log`, which is captain-private like the rest of `state/`.
-- Bulk cancel and undo are deliberately absent.
+- Closing several at once, and undo, live on the Decisions tab (below); the Board's Cancel stays one item at a time.
+
+## Acting on decisions
+
+The Decisions tab (`#/decisions`, between Board and Radar, with a badge counting what waits on you) lists every decision once and lets you act on it without going back to chat.
+The Board is unchanged and still shows every card.
+
+- One entry per decision, sorted by priority and then oldest first: decisions a running worker is blocked on come first, then your own held questions, then second mates' decisions.
+  Twin records of one decision collapse into one entry, for example a second mate's own hold and the parent's relayed `captain-hold-<id>` copy; the page says how many were folded, in total and on the entry.
+- Each entry spells out what a click will do, beside its button, and says plainly when it cannot be undone.
+- The result shows under the entry as soon as the script answers: plain words on success, the exact reason and the script's own output on failure.
+  A decision stays answerable after a failure, and a success leaves it dimmed until the next snapshot drops it.
+  If a snapshot taken after the action still lists it, the page treats the action as not having taken effect and makes it actionable again.
+- Recent actions keeps this page session's results, newest first, until the page is reloaded.
+
+What each button does:
+
+| Button | Script run | Undo |
+| --- | --- | --- |
+| Send answer, on a held question (`captain` kind) | `bin/fm-captain-hold.sh answer <id> --decision-file <file>` | No: the answer is recorded and the question closes. |
+| Send answer, on held work (any other kind, or a hold on a running task) | `bin/fm-captain-hold.sh answer <id> --decision-file <file> --release` | No: the work goes ahead. |
+| Send answer, on a hold of unknown kind | Either of the two above, by a choice the page makes you take | No. |
+| Send to the worker, on a worker's open `needs-decision` | `bin/fm-send.sh <task> --resolve-key <key> <text>` | No: the text is in the worker's inbox and its question closes. |
+| Defer | `bin/fm-captain-hold.sh hold <id> --reason <the hold's own reason> --until <date>` | Yes, one step, while the server keeps running: the same `hold` without `--until`, which keeps the original hold time. |
+| Close as settled | `bin/fm-captain-hold.sh answer <id> --decision-file <file>` through `cancel.js` (Outdated, Already handled, or Other with a note) | No. |
+
+- Options come from the hold's reason when it has two or more lettered or numbered choices in order, starting at A or 1, such as `(A) keep it (B) drop it` or `1. ship 2. wait`; the option's text, not just its letter, is recorded.
+  Anything else is free text, and free text is always available.
+- The recorded and relayed words always begin `Answered from the dashboard: `, so a worker's terminal can never read an answer that starts with `/`, `$`, or `--` as a command, and control characters are dropped.
+  An answer is at most 2000 characters.
+- A decision from a second mate's home, or a worker question the page cannot steer, has no answer button: it shows why and leaves the answer to chat, because the owning home's records are not this page's to write.
+- Defer needs a day after today and within a year; Tomorrow, In a week, and In a month fill it in.
+- Why only a deferral can be undone: tasks-axi can reopen a closed task, but that leaves the old resolution block in the body and drops the hold's set time, so it is not a clean undo, and a message already in a worker's inbox cannot be taken back.
+- Select any decisions that can be closed or deferred (a hold with no worker or pull request on it can be closed; any hold in this home can be deferred), then Close as settled or Defer.
+  A dialog states the exact count, lists the titles, and asks for one reason or one day for all.
+  The server requires the confirmed count to match, runs them one after another, never stops at a failure, and reports each outcome; a partial result names what was not done and why.
+  A selection that mixes in decisions the action cannot apply to says how many are left alone.
+- Every attempt that reaches a script appends one JSON line (`at`, `action`, `ref`, `mode`, `outcome`, and for a deferral the date) to `$FM_HOME/state/webview-actions.log`.
+  It never holds the words you typed, a title, or a hold reason.
 
 ## Board columns
 
@@ -143,10 +181,10 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
 - `GET /api/agents` and `GET /api/agents/log` return process and log data, which can hold secrets or PHI, so they also require the per-launch `X-Webview-Token`, send `Cache-Control: no-store` like every route, and are never cached to disk or written to the server log.
   `agents.js` builds the process allowlist from a process table at most 3 seconds old and the task allowlist from the snapshot: `task` must be a snapshot task id, `pid` must be a current agent process, `lines` is a positive whole number clamped to 1000, and paths are built only from `FM_HOME/state/<id>.status`, fixed `~/.claude` and `~/.codex` roots, a validated session id, and a sanitised folder name.
   `agent-logs.js` runs `ps`, `lsof`, `fm-peek.sh` (with `FM_GUARD_READ_ONLY=1`, so it never consumes firstmate's watcher-down banner), and `no-mistakes` with argument arrays and 3 to 8 second timeouts, and masks AWS keys, bearer and authorization values, GitHub, Slack, and API keys, JWTs, URL passwords, private key blocks, and `password=`-style values before any text leaves the server; the panel says logs may still contain sensitive data.
-- Every route is `GET`/`HEAD` only, except three that accept only `POST`: `POST /api/stray-helpers/<pid>/kill`, `POST /api/cancel`, and `POST /api/radar/<id>/dismiss|snooze`.
+- Every route is `GET`/`HEAD` only, except four that accept only `POST`: `POST /api/stray-helpers/<pid>/kill`, `POST /api/cancel`, `POST /api/decisions/act` and `POST /api/decisions/bulk`, and `POST /api/radar/<id>/dismiss|snooze`.
   The radar writes carry the same Origin, per-launch token, and JSON-only guards as the stop request below, and accept only a well-formed item id.
   There is no generic kill endpoint and no request field names a command, script, or signal.
-- A stop or cancel request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB: for a stop, the `command` and `ageSeconds` the page displayed; for a cancel, `{id, reason, note}`.
+- A stop, cancel, or decision request must carry `Origin: http://<the Host it was sent to>`, an `X-Webview-Token` header equal to a random token generated at each launch, and an `application/json` body under 4 KB (16 KB for a decision, which may carry a free-text answer or fifty references): for a stop, the `command` and `ageSeconds` the page displayed; for a cancel, `{id, reason, note}`; for a decision, `{action, ref, ...}` with `action` one of `answer`, `defer`, `undo-defer`, `settle`, or a bulk `{action, refs, count, ...}`.
   The token is placed in the served page only; other origins cannot read the page, so they cannot send it back.
 - `stray-kill.js` re-reads the process table at request time and refuses (409) any pid that is not a current stray, belongs to another user, no longer has parent pid 1, is a Claude session or the web view itself, or has any child process.
   No child of a stray is itself a stray, because a stray must have parent pid 1.
@@ -157,6 +195,14 @@ node --test webview/tests/*.test.js                 # or: cd webview && npm test
   A pid can still change between the last check and the signal; the window is a few milliseconds and the identity check above narrows it.
 - `cancel.js` refuses (404) an id not in the current snapshot's backlog and (409) one that is finished, has a task record (a worker), has a PR, or is in flight; it also refuses an id whose `state/<id>.meta` appeared after the snapshot, and (400) a missing reason or an Other with no note.
   The id must look like a task id, so it can never reach a script as a flag, and only one cancel runs at a time.
+- `act.js` accepts no id, script name, flag, or mode from the page: a request names a `ref` that must be an entry `decisionItems()` in `public/render.js` offers on the server's own latest snapshot, and the server derives the script, the close mode, and the worker target from that entry.
+  Ids and keys must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$` before they reach a script, so none can look like a flag.
+  The only scripts it runs are `fm-captain-hold.sh` (`answer` and `hold`), `fm-send.sh` (`--resolve-key`), and, through `cancel.js`, `fm-captain-hold.sh answer` and `fm-tasks-axi.sh done`.
+  There is no delete, merge, lifecycle-control, or file-editing path.
+- Only one state-changing decision or cancel request runs at a time; a second gets `409`.
+  The server also remembers what it already did and refuses a repeat (a double click, a retry, or a stale page) until a snapshot taken after the action has been seen.
+  A hold that gained a worker since the snapshot is refused, as for cancel.
+  Undo works only for a deferral this process made, and it re-uses the reason the server read from its own snapshot, never one from the page.
 - The snapshot script is run with `spawn` and an argument array, never a shell.
 - Every fleet-derived string reaches the DOM through `textContent`, and a test forbids HTML-injecting sinks in the client code.
 

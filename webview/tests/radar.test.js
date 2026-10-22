@@ -162,6 +162,7 @@ test('server: GET /api/radar, and dismiss/snooze carry the same guards as the st
 });
 
 const tabsFor = (page, radarValue, snapshot) => R.tabs({ page, snapshot, radar: radarValue });
+const radarTabOf = (page, radarValue, snapshot) => tabsFor(page, radarValue, snapshot).find((t) => t.key === 'radar');
 const present = (value) => ({ present: true, ...radar.parseRadar(JSON.stringify(value), NOW) });
 
 test('tabs: hash routing opens Radar for #radar and #/radar, Board otherwise, and card links keep their key', () => {
@@ -178,24 +179,25 @@ test('tabs: selection follows the page, and Charts or Machine select neither tab
   assert.deepEqual(selected('board'), ['board']);
   assert.deepEqual(selected('radar'), ['radar']);
   assert.deepEqual(selected('charts'), []);
-  assert.deepEqual(tabsFor('board', null, null).map((t) => t.href), ['#/board', '#radar', '#agents']);
+  assert.deepEqual(tabsFor('board', null, null).map((t) => t.href), ['#/board', '#/decisions', '#radar', '#agents']);
+  assert.deepEqual(selected('decisions'), ['decisions']);
 });
 
 test('tabs: the Radar badge counts visible items and warns when one source failed, even from the Board tab', () => {
   const failed = present(file({ sources: { slack: source({ health: 'unavailable', reason: 'login needed' }), teams: source() } }));
-  const [, radarTab] = tabsFor('board', failed, null);
+  const radarTab = radarTabOf('board', failed, null);
   assert.equal(radarTab.count, 2);
   assert.equal(radarTab.hasWarning, true);
   assert.match(radarTab.description, /2 items, a chat source has a problem/);
-  const healthy = tabsFor('board', present(file()), null)[1];
+  const healthy = radarTabOf('board', present(file()), null);
   assert.equal(healthy.hasWarning, false);
-  assert.equal(tabsFor('board', present(file({ items: [item('slack', 1)] })), null)[1].description, 'Radar, 1 item');
-  assert.equal(tabsFor('board', present(file({ sources: { slack: source(), teams: source({ readAt: at(120) }) } })), null)[1].hasWarning, true);
-  assert.equal(R.tabs({ page: 'board', radar: { present: true, error: 'bad json' } })[1].hasWarning, true);
+  assert.equal(radarTabOf('board', present(file({ items: [item('slack', 1)] })), null).description, 'Radar, 1 item');
+  assert.equal(radarTabOf('board', present(file({ sources: { slack: source(), teams: source({ readAt: at(120) }) } })), null).hasWarning, true);
+  assert.equal(radarTabOf('board', { present: true, error: 'bad json' }, null).hasWarning, true);
 });
 
 test('tabs: no radar.json gives a zero badge, no warning, and the empty state on the Radar tab', () => {
-  const [, radarTab] = tabsFor('radar', { present: false }, null);
+  const radarTab = radarTabOf('radar', { present: false }, null);
   assert.equal(radarTab.count, 0);
   assert.equal(radarTab.hasWarning, false);
   const t = R.radarTab({ present: false });

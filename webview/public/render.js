@@ -395,7 +395,7 @@
         options: parseOptions(d.summary), ageSeconds, isAging: ageSeconds != null && ageSeconds >= AGING_AFTER,
         priority: answer ? (c.source === 'task' ? 0 : 1) : 2, collapsed: members.length - 1,
         actions: { answer, defer: isMainHold, settle: isCancellable, readOnly: answer ? null : readOnlyReason(owner) },
-        needsMode: answer?.type === 'hold' && answer.mode == null, sourceUrls: c.sourceUrls,
+        needsMode: answer?.type === 'hold' && answer.mode == null, cardKey: c.key,
       };
     }).sort((a, b) => a.priority - b.priority || (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1) || a.title.localeCompare(b.title));
     return { items, collapsed: items.reduce((n, i) => n + i.collapsed, 0) };
@@ -416,6 +416,20 @@
     if (!clean) return { error: 'write an answer or pick an option' };
     if (clean.length > ANSWER_MAX) return { error: `keep the answer to ${ANSWER_MAX} characters` };
     return { text: `Answered from the dashboard: ${clean}`, summary: 'free text' };
+  };
+
+  // The inline result on a decision after an action: plain words on success, the exact reason and script output on failure.
+  const resultLine = (action, result, item) => {
+    if (result.outcome === 'answered') {
+      const line = result.kind === 'relay' ? 'Sent to the worker, and its question is closed.'
+        : result.mode === 'release' ? 'Answered. The held work can go ahead.' : 'Answered and closed.';
+      return { tone: 'ok', text: result.output ? `${line} Note from firstmate: ${result.output}` : line };
+    }
+    if (result.outcome === 'deferred') return { tone: 'ok', text: `Deferred until ${result.until}.` };
+    if (result.outcome === 'undone') return { tone: 'ok', text: 'Back on your list.' };
+    if (result.outcome === 'settled') return { tone: 'ok', text: 'Closed as settled.' };
+    const verb = { answer: 'send your answer', defer: 'defer', 'undo-defer': 'undo the deferral', settle: 'close' }[action] ?? 'do that';
+    return { tone: 'error', text: `Could not ${verb}${item ? ` for "${item.title}"` : ''}: ${result.reason ?? result.outcome}.${result.output ? ` ${result.output}` : ''}` };
   };
 
   const DEFER_MAX_DAYS = 366;
@@ -676,7 +690,7 @@
     if (page === 'card' && rest[0]) return { page: 'card', key: decodeURIComponent(rest.join('/')) };
     if (page === 'task' && rest[0]) return { page: 'card', key: `task:${decodeURIComponent(rest[0])}` };
     if (page === 'list' && rest.length) return { page, filter: rest.join('/') };
-    if (['machine', 'charts', 'radar', 'agents'].includes(page)) return { page };
+    if (['machine', 'charts', 'radar', 'agents', 'decisions'].includes(page)) return { page };
     if (path === 'radar' || path === 'agents') return { page: path };
     return { page: 'board', column: rest[0] ?? null, params: new URLSearchParams(query) };
   };
@@ -705,9 +719,12 @@
     const rt = radarTab(radar);
     const at = agentsTab(agents);
     const needsYou = snapshot ? fleetCounts(snapshot).needsYou : null;
+    const decisions = snapshot ? decisionItems(snapshot).items.length : null;
     return [
       { key: 'board', label: 'Board', href: '#/board', count: needsYou, hasWarning: false, isSelected: page === 'board',
         description: needsYou == null ? 'Board' : `Board, ${needsYou} need${needsYou === 1 ? 's' : ''} you` },
+      { key: 'decisions', label: 'Decisions', href: '#/decisions', count: decisions, hasWarning: false, isSelected: page === 'decisions',
+        description: decisions == null ? 'Decisions' : `Decisions, ${decisions} waiting on you` },
       { key: 'radar', label: 'Radar', href: '#radar', count: rt.count, hasWarning: rt.hasWarning, isSelected: page === 'radar',
         description: `Radar, ${rt.count} item${rt.count === 1 ? '' : 's'}${rt.hasWarning ? ', a chat source has a problem' : ''}` },
       { key: 'agents', label: 'Agents', href: '#agents', count: at.count, hasWarning: at.hasWarning, isSelected: page === 'agents',
@@ -717,7 +734,7 @@
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
-    cards, cardRegistry, cancelPlan, isCancellable, decisionItems, findDecision, parseOptions, answerText, deferDate, effectOf, PRIORITY_LABELS, ANSWER_MAX, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    cards, cardRegistry, cancelPlan, isCancellable, decisionItems, findDecision, parseOptions, answerText, deferDate, effectOf, resultLine, PRIORITY_LABELS, ANSWER_MAX, DEFER_MAX_DAYS, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
     duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask, radarTab, agentsTab, tabs, route,
   };
 });

@@ -103,6 +103,17 @@ test('what a click will do is spelled out per action, with an honest label when 
   assert.match(R.effectOf(item(null), 'defer', { until: '2026-08-01' }), /until 2026-08-01.*undo/);
 });
 
+test('the inline result says what happened in plain words and keeps a failure\'s exact reason and output', () => {
+  const item = { title: 'Pick a name' };
+  assert.deepEqual(R.resultLine('answer', { outcome: 'answered', kind: 'hold', mode: 'done' }, item), { tone: 'ok', text: 'Answered and closed.' });
+  assert.equal(R.resultLine('answer', { outcome: 'answered', kind: 'hold', mode: 'release' }, item).text, 'Answered. The held work can go ahead.');
+  assert.match(R.resultLine('answer', { outcome: 'answered', kind: 'relay', output: 'careful' }, item).text, /^Sent to the worker.*Note from firstmate: careful$/);
+  assert.equal(R.resultLine('defer', { outcome: 'deferred', until: '2026-08-01' }, item).text, 'Deferred until 2026-08-01.');
+  assert.deepEqual(R.resultLine('answer', { outcome: 'failed', reason: 'the firstmate script refused or failed', output: 'demo refusal' }, item),
+    { tone: 'error', text: 'Could not send your answer for "Pick a name": the firstmate script refused or failed. demo refusal' });
+  assert.equal(R.resultLine('settle', { outcome: 'refused', reason: 'nope' }).text, 'Could not close: nope.');
+});
+
 test('the ledger forgets an action only once a newer snapshot has been observed', () => {
   const ledger = act.makeLedger();
   ledger.mark('hold:demo-q');

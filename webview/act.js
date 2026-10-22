@@ -95,7 +95,8 @@ const answerDecision = async (ctx, body) => {
   await audit(ctx.home, { action: 'answer', ref: item.ref, mode: mode ?? 'relay', said: said.summary, outcome: result.ok ? 'answered' : 'failed' });
   if (!result.ok) return failed(result);
   ctx.ledger.mark(item.ref);
-  return { outcome: 'answered', kind: answer.type, mode: mode ?? null, output: result.output || undefined };
+  // A held-question answer prints only its own confirmation; a relay's output can carry a delivery warning worth showing.
+  return { outcome: 'answered', kind: answer.type, mode: mode ?? null, output: answer.type === 'relay' ? result.output || undefined : undefined };
 };
 
 const deferDecision = async (ctx, { ref, until }) => {
