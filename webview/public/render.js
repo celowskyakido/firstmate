@@ -333,6 +333,116 @@
     return { reason, note: clean, text: `Cancelled from the dashboard: ${label.toLowerCase()}${clean ? `. Note: ${clean}` : ''}` };
   };
 
+  // ---- acting on decisions ----
+  // One entry per decision the captain can answer, defer, or close from the Decisions tab.
+  // The server runs this same function on its own snapshot before acting, so the page can never ask for more than it was offered.
+  const OPTION_MARK = /(^|[\s;,:])(?:\(([A-Za-z1-9])\)|([A-Za-z1-9])[.)])(?=\s)/g;
+  const OPTION_TEXT_MAX = 300;
+  // Letters and digits run in sequence; Z and 9 end a run.
+  const successor = (label) => (label === 'Z' || label === '9' ? null : String.fromCharCode(label.charCodeAt(0) + 1));
+  const optionText = (raw, isLast) => {
+    const line = isLast ? raw.split('\n')[0] : raw;
+    return line.replace(/\s+/g, ' ').trim().replace(/[\s;,.]*(?:\b(?:or|and)\b)?[\s;,.]*$/i, '').trim().slice(0, OPTION_TEXT_MAX);
+  };
+  // Lettered or numbered choices such as "(A) keep it (B) drop it": two or more labels in order, starting at A or 1.
+  // Anything else is free text. The heuristic only offers shortcuts, so a miss costs nothing.
+  const parseOptions = (reason) => {
+    const text = String(reason ?? '').replace(/\\n/g, '\n');
+    const marks = [...text.matchAll(OPTION_MARK)].map((m) => ({ label: (m[2] ?? m[3]).toUpperCase(), start: m.index + m[1].length, end: m.index + m[0].length }));
+    const run = [];
+    marks.forEach((mark) => {
+      if (!run.length ? mark.label === 'A' || mark.label === '1' : mark.label === successor(run[run.length - 1].label)) run.push(mark);
+    });
+    if (run.length < 2) return [];
+    const options = run.map((mark, i) => ({ label: mark.label, text: optionText(text.slice(mark.end, run[i + 1]?.start ?? text.length), i === run.length - 1) }));
+    return options.every((o) => o.text) ? options : [];
+  };
+
+  const TWIN_PREFIX = /^captain-hold-/;
+  // Why a decision has no Answer button, in the captain's words.
+  const readOnlyReason = (owner) => (owner
+    ? `It lives in second mate ${owner}'s home. Tell firstmate your answer in chat and it will relay it.`
+    : 'Nothing here can record an answer for it. Tell firstmate in chat.');
+  const PRIORITY_LABELS = ['A worker is waiting on this', 'Your call', 'Second mate'];
+
+  // Cards fold twin records into one: a second mate's own hold and the parent's relayed `captain-hold-<id>` copy
+  // are the same decision, so they share one entry that remembers how many records it stands for.
+  const decisionItems = (snapshot) => {
+    const all = cards(snapshot).filter((c) => (c.column === 'decide' || c.column === 'aging') && c.decisions.length);
+    const tasksById = new Map((snapshot.tasks ?? []).map((t) => [t.id, t]));
+    const groups = new Map();
+    all.forEach((c) => c.decisions.forEach((d) => {
+      const scope = d.owner?.id ?? (c.kind === 'secondmate' ? c.id : '');
+      const canon = d.owner ? (d.kind === 'captain-hold' ? d.holdId : `${d.id ?? ''}:${d.key}`) : String(d.holdId ?? d.key).replace(TWIN_PREFIX, '');
+      const id = `${scope}|${canon}`;
+      groups.set(id, [...(groups.get(id) ?? []), { c, d, scope }]);
+    }));
+    // The main home's own hold is the record an answer closes; a second mate's own record beats a relayed copy.
+    const rank = ({ d }) => (!d.owner && d.kind === 'captain-hold' ? 0 : d.owner ? 1 : 2);
+    const items = [...groups].map(([groupId, members]) => {
+      const { c, d, scope } = [...members].sort((a, b) => rank(a) - rank(b))[0];
+      const task = c.taskId ? tasksById.get(c.taskId) : null;
+      const isMainHold = !d.owner && d.kind === 'captain-hold';
+      const isRelayable = !d.owner && d.kind === 'needs-decision' && Boolean(task?.actions?.steer) && task.kind !== 'secondmate';
+      const answer = isMainHold ? { type: 'hold', id: d.holdId, mode: { question: 'done', work: 'release' }[d.shape] ?? null }
+        : isRelayable ? { type: 'relay', task: c.taskId, key: d.key } : null;
+      const owner = d.owner?.id ?? (c.kind === 'secondmate' ? c.id : null);
+      const ageSeconds = members.reduce((max, m) => (m.d.ageSeconds != null && (max == null || m.d.ageSeconds > max) ? m.d.ageSeconds : max), null);
+      const isCancellable = isMainHold && Boolean(cancelPlan(snapshot, d.holdId).kind);
+      return {
+        ref: answer ? (answer.type === 'hold' ? `hold:${answer.id}` : `relay:${answer.task}:${answer.key}`) : `readonly:${groupId}`,
+        title: isMainHold || !d.owner ? c.title : d.summary, project: c.project, summary: String(d.summary ?? '').replace(/\\n/g, '\n'),
+        options: parseOptions(d.summary), ageSeconds, isAging: ageSeconds != null && ageSeconds >= AGING_AFTER,
+        priority: answer ? (c.source === 'task' ? 0 : 1) : 2, collapsed: members.length - 1,
+        actions: { answer, defer: isMainHold, settle: isCancellable, readOnly: answer ? null : readOnlyReason(owner) },
+        needsMode: answer?.type === 'hold' && answer.mode == null, sourceUrls: c.sourceUrls,
+      };
+    }).sort((a, b) => a.priority - b.priority || (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1) || a.title.localeCompare(b.title));
+    return { items, collapsed: items.reduce((n, i) => n + i.collapsed, 0) };
+  };
+  const findDecision = (snapshot, ref) => decisionItems(snapshot).items.find((i) => i.ref === ref) ?? null;
+
+  const ANSWER_MAX = 2000;
+  // The captain's words as recorded and as sent to a worker. The fixed lead-in marks where it came from and keeps
+  // a stray leading "/", "$", or "--" from ever being read as a command by the worker's terminal.
+  const answerText = ({ text, option } = {}, item) => {
+    if ((text == null) === (option == null)) return { error: 'give either your own words or one of the listed options' };
+    if (option != null) {
+      const picked = item.options.find((o) => o.label === String(option).toUpperCase());
+      return picked ? { text: `Answered from the dashboard: option (${picked.label}) ${picked.text}`, summary: `option ${picked.label}` } : { error: 'that is not one of the listed options' };
+    }
+    if (typeof text !== 'string') return { error: 'the answer must be text' };
+    const clean = text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (!clean) return { error: 'write an answer or pick an option' };
+    if (clean.length > ANSWER_MAX) return { error: `keep the answer to ${ANSWER_MAX} characters` };
+    return { text: `Answered from the dashboard: ${clean}`, summary: 'free text' };
+  };
+
+  const DEFER_MAX_DAYS = 366;
+  // A deferral date: a real calendar day after today, within a year.
+  const deferDate = (until, today = localDate(new Date())) => {
+    if (typeof until !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(until) || Number.isNaN(Date.parse(`${until}T00:00:00Z`)) || new Date(`${until}T00:00:00Z`).toISOString().slice(0, 10) !== until) {
+      return { error: 'choose a date as YYYY-MM-DD' };
+    }
+    const days = (Date.parse(`${until}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / (DAY * 1000);
+    if (days < 1) return { error: 'choose a day after today' };
+    if (days > DEFER_MAX_DAYS) return { error: 'choose a day within the next year' };
+    return { until };
+  };
+
+  // What a click will do, shown beside each button before it is pressed.
+  const EFFECTS = {
+    done: 'Records your answer and closes this decision. It cannot be undone from here.',
+    release: 'Records your answer and lets the held work go ahead. It cannot be undone from here.',
+    relay: "Sends your answer to the worker's inbox and closes its open question. It cannot be undone from here.",
+    settle: 'Closes this decision as settled, with your reason recorded. It cannot be undone from here.',
+  };
+  const effectOf = (item, kind, { mode, until } = {}) => {
+    if (kind === 'defer') return until ? `Hides this decision until ${until}. You can undo it from Recent actions.` : 'Pick a day. It comes back on that day, and you can undo it from Recent actions.';
+    if (kind === 'settle') return EFFECTS.settle;
+    return item.actions.answer?.type === 'relay' ? EFFECTS.relay : EFFECTS[item.actions.answer?.mode ?? mode] ?? 'Choose whether to close the question or let the held work go ahead.';
+  };
+
   // Oldest first, so the longest waits are on top; recently finished work shows newest first.
   const byAge = (a, b) => (b.ageSeconds ?? -1) - (a.ageSeconds ?? -1);
   const byDate = (a, b) => (b.date ?? '9999').localeCompare(a.date ?? '9999');
@@ -607,7 +717,7 @@
 
   return {
     SCHEMA, COLUMNS, GROUPS, AGE_BUCKETS, AGING_AFTER, assertSchema, taskDetail, freshnessBanner, resourcesView,
-    cards, cardRegistry, cancelPlan, isCancellable, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
+    cards, cardRegistry, cancelPlan, isCancellable, decisionItems, findDecision, parseOptions, answerText, deferDate, effectOf, PRIORITY_LABELS, ANSWER_MAX, cancelReason, CANCEL_REASONS, CANCEL_NOTE_MAX, workColumn, boardView, viewFor, machineStatus, projects, projectName, prNumber, fleetCounts, machineSample, stateBreakdown, projectBars, ageHistogram, listView, kpis,
     duration, localDate, isWebUrl, classifySource, sourceLinks, cardSources, RADAR_SOURCES, radarView, radarByTask, radarTab, agentsTab, tabs, route,
   };
 });

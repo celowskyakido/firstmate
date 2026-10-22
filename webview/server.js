@@ -2,7 +2,7 @@
 // Localhost-only web view over `bin/fm-fleet-snapshot.sh --json`.
 // Zero dependencies. All fleet derivation stays in the snapshot script; this
 // process caches its output and serves it. Its only writes are the guarded
-// routes in stray-kill.js and cancel.js.
+// routes in stray-kill.js, cancel.js, act.js, and radar.js.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
@@ -13,6 +13,7 @@ const resourcesLib = require('./resources');
 const history = require('./history');
 const { killStray } = require('./stray-kill');
 const { cancelItem } = require('./cancel');
+const act = require('./act');
 const radar = require('./radar');
 const agents = require('./agents');
 const R = require('./public/render');
@@ -38,8 +39,11 @@ const INBOX_TEXT_BYTES = 4 * 1024;
 const HISTORY_POINTS = 360;
 const KILL_ROUTE = /^\/api\/stray-helpers\/(\d+)\/kill$/;
 const CANCEL_ROUTE = '/api/cancel';
+const DECISION_ROUTES = { '/api/decisions/act': 'act', '/api/decisions/bulk': 'bulk' };
 const RADAR_ROUTE = /^\/api\/radar\/([^/]+)\/(dismiss|snooze)$/;
 const MAX_BODY_BYTES = 4096;
+// A free-text answer or a list of fifty decisions needs more room than a stop or cancel request.
+const MAX_DECISION_BODY_BYTES = 16 * 1024;
 const TOKEN_PLACEHOLDER = '__WEBVIEW_TOKEN__';
 
 const parseSnapshot = (stdout) => {
@@ -129,13 +133,13 @@ const makePoller = (startRun, pollMs, onValue = () => {}) => {
   };
 };
 
-const readBody = (req) => new Promise((resolve, reject) => {
+const readBody = (req, maxBytes) => new Promise((resolve, reject) => {
   let body = '';
   let isTooLarge = false;
   req.setEncoding('utf8');
   // An oversized body is drained rather than cut off, so the client still gets the refusal.
   req.on('data', (chunk) => {
-    isTooLarge ||= body.length + chunk.length > MAX_BODY_BYTES;
+    isTooLarge ||= body.length + chunk.length > maxBytes;
     if (!isTooLarge) body += chunk;
   });
   req.on('end', () => (isTooLarge ? reject(new Error('body too large')) : resolve(body)));
@@ -175,7 +179,7 @@ const readLinkConfig = (home, env = process.env) => {
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
   resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
-  killDeps = {}, cancelDeps = {}, agentsDeps = {}, token = crypto.randomBytes(24).toString('hex'),
+  killDeps = {}, cancelDeps = {}, agentsDeps = {}, actDeps = {}, token = crypto.randomBytes(24).toString('hex'),
 }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
@@ -209,11 +213,11 @@ async function start({
 
   // Every write: Origin must be this page and the token must match this launch.
   // Returns the parsed body, or undefined after sending the refusal.
-  const readWrite = async (req, res) => {
+  const readWrite = async (req, res, maxBytes = MAX_BODY_BYTES) => {
     if (req.headers.origin !== `http://${req.headers.host}`) return void sendJson(res, 403, { outcome: 'refused', reason: 'request did not come from this page' });
     if (!sameToken(req.headers['x-webview-token'], token)) return void sendJson(res, 403, { outcome: 'refused', reason: 'missing or wrong page token; reload the page' });
     if (!/^application\/json(;|$)/.test(req.headers['content-type'] ?? '')) return void sendJson(res, 415, { outcome: 'refused', reason: 'expected application/json' });
-    try { return JSON.parse(await readBody(req)); } catch { return void sendJson(res, 400, { outcome: 'refused', reason: 'body must be JSON under 4 KB' }); }
+    try { return JSON.parse(await readBody(req, maxBytes)); } catch { return void sendJson(res, 400, { outcome: 'refused', reason: `body must be JSON under ${maxBytes / 1024} KB` }); }
   };
 
   // The stray rules are re-checked against a fresh process table inside killStray.
@@ -229,23 +233,49 @@ async function start({
     return sendJson(res, status, { pid, ...result });
   };
 
+  // One state-changing request at a time across cancel and the decision actions, so two clicks never interleave their scripts.
+  // ponytail: a single lock for the whole server; per-id locks if several people ever share one page.
+  let isBusy = false;
+  const exclusive = async (res, id, work) => {
+    if (isBusy) return sendJson(res, 409, { id, outcome: 'refused', reason: 'another change is still running; try again in a moment' });
+    isBusy = true;
+    try { return await work(); } finally { isBusy = false; }
+  };
+  const ledger = act.makeLedger();
+  const actRun = actDeps.run ?? cancelDeps.run;
+  const decisionContext = () => ({ home, snapshot: snapshots.state.value, ledger, run: actRun ?? act.runScript(home) });
+
   // The id must be cancellable in the current snapshot; cancelItem re-checks it and runs the script.
-  // ponytail: one cancel at a time across the server; per-id locks if several people ever share one page.
-  let isCancelling = false;
   const handleCancel = async (req, res) => {
     const body = await readWrite(req, res);
     if (body === undefined) return undefined;
     const id = body?.id;
     if (typeof id !== 'string' || id.length > 120 || !TASK_ID.test(id)) return sendJson(res, 400, { outcome: 'refused', reason: 'expected {id, reason, note} with a task id' });
     if (!snapshots.state.value) return sendJson(res, 503, { id, outcome: 'refused', reason: 'the fleet snapshot has not loaded yet' });
-    if (isCancelling) return sendJson(res, 409, { id, outcome: 'refused', reason: 'another cancel is still running; try again in a moment' });
-    isCancelling = true;
-    try {
+    return exclusive(res, id, async () => {
+      if (ledger.isSettled(`hold:${id}`, snapshots.state.value)) return sendJson(res, 409, { id, outcome: 'refused', reason: 'it was already handled from this page; the next refresh will drop it' });
       const result = await cancelItem({ home, snapshot: snapshots.state.value, id, reason: body.reason, note: body.note, ...cancelDeps });
+      if (result.outcome === 'cancelled') ledger.mark(`hold:${id}`);
       console.error(`webview: cancel ${id}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}`);
       const status = result.outcome === 'cancelled' ? 200 : result.outcome === 'failed' ? 500 : result.isUnknown ? 404 : result.isBadRequest ? 400 : 409;
       return sendJson(res, status, { id, outcome: result.outcome, reason: result.reason, output: result.output });
-    } finally { isCancelling = false; }
+    });
+  };
+
+  // Answer, defer, undo a deferral, or close one decision; or the same action over a confirmed selection.
+  const publicResult = ({ isUnknown, isBadRequest, ...rest }) => rest;
+  const handleDecision = async (req, res, kind) => {
+    const body = await readWrite(req, res, MAX_DECISION_BODY_BYTES);
+    if (body === undefined) return undefined;
+    if (!snapshots.state.value && body?.action !== 'undo-defer') return sendJson(res, 503, { outcome: 'refused', reason: 'the fleet snapshot has not loaded yet' });
+    return exclusive(res, null, async () => {
+      const ctx = decisionContext();
+      const result = await (kind === 'bulk' ? act.bulkAct(ctx, body) : act.actOnDecision(ctx, body));
+      console.error(`webview: decision ${kind} ${typeof body?.action === 'string' ? body.action.slice(0, 20) : '?'}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}`);
+      const status = kind === 'bulk' && !result.isBadRequest && result.outcome !== 'refused' ? 200
+        : { done: 200, answered: 200, deferred: 200, undone: 200, settled: 200, failed: 500 }[result.outcome] ?? (result.isUnknown ? 404 : result.isBadRequest ? 400 : 409);
+      return sendJson(res, status, publicResult(result));
+    });
   };
 
   const handleRadar = async (req, res, id, action) => {
@@ -266,9 +296,10 @@ async function start({
     const kill = pathname.match(KILL_ROUTE);
     const radarChoice = pathname.match(RADAR_ROUTE);
     const isCancel = pathname === CANCEL_ROUTE;
-    // Stopping a stray helper, cancelling a backlog item, and dismissing or snoozing a radar item are the only writes; every other route is read-only.
+    const decision = DECISION_ROUTES[pathname];
+    // Stopping a stray helper, cancelling a backlog item, acting on a decision, and dismissing or snoozing a radar item are the only writes; every other route is read-only.
     // Unread request bodies are drained so a refused request leaves the connection usable.
-    const isWrite = Boolean(kill || radarChoice) || isCancel;
+    const isWrite = Boolean(kill || radarChoice || decision) || isCancel;
     if (req.method !== 'POST' || !isWrite) req.resume();
     if (isWrite && req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' }, { Allow: 'POST' });
     if (!isWrite && req.method !== 'GET' && req.method !== 'HEAD') {
@@ -277,6 +308,7 @@ async function start({
     try {
       if (kill) return await handleKill(req, res, Number(kill[1]));
       if (isCancel) return await handleCancel(req, res);
+      if (decision) return await handleDecision(req, res, decision);
       if (radarChoice) return await handleRadar(req, res, decodeURIComponent(radarChoice[1]), radarChoice[2]);
       if (pathname === '/api/radar') return sendJson(res, 200, await radar.readRadar(home));
       // Process and log data can hold secrets or PHI, so even these reads need this launch's token.
