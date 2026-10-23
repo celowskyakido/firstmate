@@ -178,7 +178,7 @@ test('tabs: selection follows the page, and Charts or Machine select neither tab
   assert.deepEqual(selected('board'), ['board']);
   assert.deepEqual(selected('radar'), ['radar']);
   assert.deepEqual(selected('charts'), []);
-  assert.deepEqual(tabsFor('board', null, null).map((t) => t.href), ['#/board', '#radar']);
+  assert.deepEqual(tabsFor('board', null, null).map((t) => t.href), ['#/board', '#radar', '#agents']);
 });
 
 test('tabs: the Radar badge counts visible items and warns when one source failed, even from the Board tab', () => {

@@ -1,0 +1,22 @@
+/* Agents tab. Colours come from style.css's theme variables. */
+.agent-counters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .75rem; margin: 1rem 0; }
+.agent-counters .kpi { border-top: 3px solid var(--hairline); align-content: start; }
+.agent-counters .tone-quiet { border-top-color: var(--done); }
+.agent-reasons { margin: .25rem 0 0; padding-left: 1rem; font-size: .8125rem; color: var(--muted); overflow-wrap: anywhere; }
+table.agents td { min-width: 0; overflow-wrap: anywhere; }
+table.agents .command { font-size: .75rem; }
+.agent-children { margin-top: .35rem; font-size: .8125rem; }
+.agent-children td { padding: .2rem .4rem; }
+.activity { display: inline-block; border-radius: 999px; padding: .05rem .5rem; font-size: .8125rem; white-space: nowrap; border: 1px solid var(--hairline); }
+.activity-ok { background: var(--ok-bg); border-color: var(--working); }
+.activity-warn { background: var(--needs-bg); border-color: var(--needs); }
+.activity-alert { background: var(--alert-bg); border-color: var(--blocked); }
+.activity-quiet { color: var(--muted); }
+.link-button { font: inherit; font-weight: 600; color: var(--link); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.link-button:hover { text-decoration: underline; }
+dialog.agent-log { width: min(64rem, 100vw); }
+.agent-log-notice { background: var(--needs-bg); border-left: 3px solid var(--needs); padding: .5rem .75rem; border-radius: 6px; font-size: .875rem; }
+.agent-log-controls { display: flex; flex-wrap: wrap; gap: .5rem .9rem; align-items: center; margin: .75rem 0; }
+.agent-log-controls select { font: inherit; font-size: .9375rem; }
+.agent-log-section pre { max-height: 50vh; overflow: auto; }
+.agent-log-section .unavailable { font-style: italic; }

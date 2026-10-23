@@ -14,6 +14,7 @@ const history = require('./history');
 const { killStray } = require('./stray-kill');
 const { cancelItem } = require('./cancel');
 const radar = require('./radar');
+const agents = require('./agents');
 const R = require('./public/render');
 
 const SCHEMA = 'fm-fleet-snapshot.v1';
@@ -26,6 +27,8 @@ const STATIC = {
   '/render.js': ['render.js', 'text/javascript; charset=utf-8'],
   '/charts.js': ['charts.js', 'text/javascript; charset=utf-8'],
   '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'],
+  '/agents-page.js': ['agents-page.js', 'text/javascript; charset=utf-8'],
+  '/agents.css': ['agents.css', 'text/css; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
 };
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -172,7 +175,7 @@ const readLinkConfig = (home, env = process.env) => {
 async function start({
   home, port = 4780, pollMs = 7000, snapshotTimeoutMs = 180_000, snapshotScript = SNAPSHOT_SCRIPT,
   resourcesPollMs = 5000, collectResources = () => resourcesLib.collect(), historyWindowMs = 3 * 3600_000,
-  killDeps = {}, cancelDeps = {}, token = crypto.randomBytes(24).toString('hex'),
+  killDeps = {}, cancelDeps = {}, agentsDeps = {}, token = crypto.randomBytes(24).toString('hex'),
 }) {
   if (!home) throw new Error('FM_HOME is required: refusing to guess which fleet to show');
   if (!fs.statSync(home, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FM_HOME is not a directory: ${home}`);
@@ -182,6 +185,7 @@ async function start({
     (snapshot) => fleetTrend.push(R.fleetCounts(snapshot)));
   const resources = makePoller(() => ({ done: collectResources(), cancel: () => {} }), resourcesPollMs,
     (reading) => machineTrend.push(R.machineSample(reading)));
+  const agentsView = agents.makeAgents({ home, snapshot: () => snapshots.state.value, ...agentsDeps });
 
   const send = (res, status, type, body, extra = {}) => {
     res.writeHead(status, {
@@ -275,6 +279,13 @@ async function start({
       if (isCancel) return await handleCancel(req, res);
       if (radarChoice) return await handleRadar(req, res, decodeURIComponent(radarChoice[1]), radarChoice[2]);
       if (pathname === '/api/radar') return sendJson(res, 200, await radar.readRadar(home));
+      // Process and log data can hold secrets or PHI, so even these reads need this launch's token.
+      if (pathname === '/api/agents' || pathname === '/api/agents/log') {
+        if (!sameToken(req.headers['x-webview-token'], token)) return sendJson(res, 403, { error: 'missing or wrong page token; reload the page' });
+        if (pathname === '/api/agents') return sendJson(res, 200, await agentsView.overview());
+        const { status, body } = await agentsView.log(new URL(req.url, 'http://localhost').searchParams);
+        return sendJson(res, status, body);
+      }
       if (Object.hasOwn(STATIC, pathname)) {
         const [file, type] = STATIC[pathname];
         const body = await fs.promises.readFile(path.join(PUBLIC_DIR, file));
