@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { spawnSync } = require('node:child_process');
 const R = require('../public/render');
 const act = require('../act');
 const { start } = require('../server');
@@ -90,6 +91,28 @@ test('one entry per decision: twin records collapse, the worker-blocking ones le
   assert.deepEqual(by['relay:demo-live:demo-live-q'].options.map((o) => o.text), ['tabs', 'spaces']);
   assert.equal(R.findDecision(SNAPSHOT, 'hold:demo-nope'), null);
   assert.ok(by['hold:demo-q'].isAging && !by['hold:demo-u'].isAging, 'aging starts at three days');
+});
+
+// Computed style needs a real CSS engine, so this drives headless Chrome when one is installed.
+const CHROME = [process.env.CHROME_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', 'google-chrome', 'chromium']
+  .find((c) => c && (path.isAbsolute(c) ? fs.existsSync(c) : spawnSync(c, ['--version']).status === 0));
+
+test('a read-only decision or a worker question shows no control the server would refuse', (t) => {
+  const by = Object.fromEntries(R.decisionItems(SNAPSHOT).items.map((i) => [i.ref, i]));
+  const { answer, defer, settle } = by['readonly:demo-mate|demo-mate-h1'].actions;
+  assert.deepEqual([answer, defer, settle], [null, false, false]);
+  assert.deepEqual([by['relay:demo-live:demo-live-q'].actions.defer, by['relay:demo-live:demo-live-q'].actions.settle], [false, false]);
+  // The page hides those boxes with the hidden attribute, which the boxes' own display rule must not undo.
+  if (!CHROME) return t.skip('no Chrome to compute styles');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-webview-css-'));
+  try {
+    const page = path.join(dir, 'page.html');
+    fs.writeFileSync(page, `<style>${fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8')}</style>
+      <div class="answer-box" hidden></div><div class="defer-box" hidden></div><div class="settle-box" hidden></div><div class="settle-box"></div>
+      <script>document.title = [...document.querySelectorAll('div')].map((d) => getComputedStyle(d).display).join(' ');</script>`);
+    const run = spawnSync(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${path.join(dir, 'profile')}`, '--dump-dom', `file://${page}`], { encoding: 'utf8', timeout: 60000 });
+    assert.equal(run.stdout.match(/<title>([^<]*)<\/title>/)?.[1], 'none none none flex', run.stderr);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('what a click will do is spelled out per action, with an honest label when it cannot be undone', () => {

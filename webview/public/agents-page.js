@@ -70,10 +70,12 @@
         part.meta.className = s.isAvailable ? 'muted' : 'muted unavailable';
         part.pre.hidden = !s.isAvailable;
         part.pre.textContent = shown.length ? shown.join('\n') : s.isAvailable ? '(nothing to show)' : '';
-        if (follow.checked) part.pre.scrollTop = part.pre.scrollHeight;
       });
       [...parts.keys()].filter((k) => !seen.has(k)).forEach((k) => { parts.get(k).wrap.remove(); parts.delete(k); });
-      sectionsBox.replaceChildren(...log.sections.map((s) => parts.get(s.key).wrap));
+      // Re-attaching a section resets its scroll, so only reorder when the order changed, and scroll once attached.
+      const wraps = log.sections.map((s) => parts.get(s.key).wrap);
+      if (wraps.some((w, i) => sectionsBox.children[i] !== w) || sectionsBox.children.length !== wraps.length) sectionsBox.replaceChildren(...wraps);
+      if (follow.checked) parts.forEach((part) => { part.pre.scrollTop = part.pre.scrollHeight; });
     };
 
     const pollLog = async () => {

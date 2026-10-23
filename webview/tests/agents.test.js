@@ -149,6 +149,25 @@ test('redaction: obvious secrets are masked, ordinary text kept', () => {
     ['-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\nafter', '[redacted private key]\nafter'],
     ['sk-ant-demo0123456789abcdefghij used', '[redacted key] used'],
     ['npm test passed in 3s', 'npm test passed in 3s'],
+    ['DB_PASSWORD=hunter2 next', 'DB_PASSWORD=[redacted] next'],
+    ['export MY_API_TOKEN=abc123', 'export MY_API_TOKEN=[redacted]'],
+    ['OPENAI_API_KEY=demo-value-1', 'OPENAI_API_KEY=[redacted]'],
+    ['SLACK_TOKEN=demo-value-2', 'SLACK_TOKEN=[redacted]'],
+    ['SLACK_TOKEN=xoxb-0123456789-abcdef', 'SLACK_TOKEN=[redacted token]'],
+    ['TF_VAR_aws_secret_access_key=abc', 'TF_VAR_aws_secret_access_key=[redacted]'],
+    ['mysql --password hunter2 -h db', 'mysql --password [redacted] -h db'],
+    ['gh auth login --token demo-value-3', 'gh auth login --token [redacted]'],
+    ['deploy --db-password=hunter2', 'deploy --db-password=[redacted]'],
+    [`npm_${'a1'.repeat(18)} set`, '[redacted token] set'],
+    [`AIza${'b2'.repeat(17)}c`, '[redacted key]'],
+    [`glpat-${'c3'.repeat(10)}`, '[redacted token]'],
+    [`sk_live_${'d4'.repeat(12)}`, '[redacted key]'],
+    ['npm_config_cache=/tmp/npm', 'npm_config_cache=/tmp/npm'],
+    ['token_count=42 tokenizer=bpe', 'token_count=42 tokenizer=bpe'],
+    ['mytoken=abc OLDPWD=/Users/demo', 'mytoken=abc OLDPWD=/Users/demo'],
+    ['--token-file ./t --password-stdin', '--token-file ./t --password-stdin'],
+    ['PASSWORD_FILE=/run/secrets/db', 'PASSWORD_FILE=/run/secrets/db'],
+    ['reading the password policy for AIzaSy', 'reading the password policy for AIzaSy'],
   ];
   for (const [input, output] of cases) assert.equal(L.redact(input), output, input);
   assert.deepEqual(L.cleanLines('\x1b[31mred\x1b[0m line\nsecond\n', 10), ['red line', 'second']);
@@ -311,4 +330,79 @@ test('server: agent routes need the page token and the right Host, send no-store
   } finally { console.error = original; }
   assert.deepEqual(errors, [], 'log and process data never reach the server log');
   for (const file of ['/agents-page.js', '/agents.css']) assert.equal((await get(file)).status, 200, file);
+});
+
+// A browser drops an element's scroll position when it leaves the document and ignores
+// scrollTop while detached; this stand-in DOM does the same so the log panel can be driven here.
+class FakeNode {
+  constructor(tag, value = '') { Object.assign(this, { tag, value, children: [], parent: null, dataset: {}, listeners: {}, top: 0, hidden: false }); }
+  get isConnected() { return this.isRoot || Boolean(this.parent?.isConnected); }
+  append(...nodes) { nodes.forEach((n) => { const c = n instanceof FakeNode ? n : new FakeNode('#text', String(n)); c.remove(); c.parent = this; this.children.push(c); }); }
+  remove() {
+    if (!this.parent) return;
+    this.parent.children = this.parent.children.filter((c) => c !== this);
+    this.parent = null;
+    const reset = (n) => { n.top = 0; n.children.forEach(reset); };
+    reset(this);
+  }
+  replaceChildren(...nodes) { [...this.children].forEach((c) => c.remove()); this.append(...nodes); }
+  get textContent() { return this.value + this.children.map((c) => c.textContent).join(''); }
+  set textContent(v) { this.children.forEach((c) => { c.parent = null; }); this.children = []; this.value = String(v); }
+  get scrollHeight() { return this.isConnected ? this.value.split('\n').length * 20 : 0; }
+  get scrollTop() { return this.top; }
+  set scrollTop(v) { if (this.isConnected) this.top = Math.max(0, Math.min(v, this.scrollHeight)); }
+  setAttribute() {}
+  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+  fire(type) { (this.listeners[type] ?? []).forEach((fn) => fn({ target: this, currentTarget: this })); }
+  find(match) { return match(this) ? this : this.children.reduce((hit, c) => hit ?? c.find(match), null); }
+  contains() { return false; }
+  focus() {}
+  showModal() { this.open = true; }
+}
+
+test('log panel: auto-scroll follows the tail, and a reader who scrolled up stays put across refreshes', async () => {
+  const vm = require('node:vm');
+  const body = new FakeNode('body');
+  body.isRoot = true;
+  let logLines = 50;
+  const overview = { generatedAt: new Date().toISOString(), hasSnapshot: true, unavailable: [], others: [],
+    counters: Object.fromEntries(['active', 'needs-input', 'stuck', 'idle'].map((k) => [k, { count: 0, reasons: [] }])),
+    fleet: [{ id: 'demo-task-1', activity: 'idle', reason: 'waiting', processes: [] }] };
+  const logBody = () => ({ target: { label: 'demo-task-1' }, generatedAt: new Date().toISOString(), sections: [
+    { key: 'status', title: 'Status log', isAvailable: true, source: 'status', lines: Array.from({ length: logLines }, (_, i) => `line ${i}`) },
+    { key: 'pane', title: 'Pane', isAvailable: false, reason: 'no terminal', lines: [] }] });
+  const context = vm.createContext({
+    window: { FleetRender: R }, URLSearchParams, CSS: { escape: String }, setTimeout: () => 0, clearTimeout: () => {},
+    document: { body, hidden: false, activeElement: null },
+    fetch: async (url) => ({ ok: true, status: 200, json: async () => (url.startsWith('/api/agents/log') ? logBody() : overview) }),
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'agents-page.js'), 'utf8'), context);
+  const el = (tag, props = {}, ...kids) => {
+    const node = new FakeNode(tag);
+    Object.entries(props).forEach(([k, v]) => { if (v == null) return; if (k === 'key') node.dataset.key = v; else if (k !== 'aria') node[k] = v; });
+    node.append(...kids.flat(Infinity).filter((c) => c != null && c !== '' && c !== false));
+    return node;
+  };
+  const page = context.window.FleetAgents.create({ el, text: (tag, value, props) => el(tag, { ...props, textContent: value ?? '' }), empty: (m) => el('p', { textContent: m }), token: 'demo-token', copyText: async () => true, onChange: () => {} });
+  body.append(page.node);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await page.refresh();
+  page.render();
+  const button = page.node.find((n) => n.dataset.key === 'log:task:demo-task-1');
+  button.onclick({ currentTarget: button });
+  await settle();
+  const dialog = body.find((n) => n.tag === 'dialog');
+  const pre = dialog.find((n) => n.tag === 'pre');
+  const follow = dialog.find((n) => n.type === 'checkbox');
+  const repoll = async () => { dialog.find((n) => n.tag === 'select').fire('change'); await settle(); };
+  assert.ok(pre.scrollHeight > 0 && pre.scrollTop === pre.scrollHeight, 'the first read lands on the newest line');
+  logLines = 80;
+  await repoll();
+  assert.equal(pre.scrollTop, 80 * 20, 'new lines keep the tail in view');
+  follow.checked = false;
+  follow.fire('change');
+  pre.scrollTop = 400;
+  logLines = 90;
+  await repoll();
+  assert.equal(pre.scrollTop, 400, 'with auto-scroll off a refresh leaves the reader where they were');
 });

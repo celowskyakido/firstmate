@@ -20,7 +20,7 @@ const STEP = /^[a-z0-9][a-z0-9_-]{0,40}$/;
 const SECRETS = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[redacted private key]'],
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[redacted AWS key]'],
-  [/\b(aws_secret_access_key|aws_session_token)(["']?\s*[:=]\s*["']?)[^\s"',;]+/gi, '$1$2[redacted]'],
+  [/(?<![A-Za-z0-9])(aws_secret_access_key|aws_session_token)(["']?\s*[:=]\s*["']?)[^\s"',;]+/gi, '$1$2[redacted]'],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [redacted]'],
   [/\b(authorization)(["']?\s*[:=]\s*["']?)(?:(?:Basic|Bearer)\s+)?[^\s"',;]+/gi, '$1$2[redacted]'],
   [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, '[redacted token]'],
@@ -28,7 +28,13 @@ const SECRETS = [
   [/\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}/g, '[redacted key]'],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[redacted token]'],
   [/\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, '$1[redacted]@'],
-  [/\b(password|passwd|pwd|secret|client_secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)(["']?\s*[:=]\s*["']?)[^\s"'&,;]+/gi, '$1$2[redacted]'],
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, '[redacted token]'],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, '[redacted token]'],
+  [/\bAIza[0-9A-Za-z_-]{35}/g, '[redacted key]'],
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g, '[redacted key]'],
+  // A keyword may end an underscore- or dash-joined name (DB_PASSWORD=, --db-password=) but never a plain word (mytoken=).
+  [/(?<![A-Za-z0-9])(password|passwd|pwd|secret|client_secret|(?:api|secret|private|access)[_-]?key|access[_-]?token|auth[_-]?token|token)(["']?\s*[:=]\s*["']?)(?!\[redacted)[^\s"'&,;]+/gi, '$1$2[redacted]'],
+  [/(?<![A-Za-z0-9-])(--?(?:[A-Za-z0-9]+[_-])*(?:password|passwd|pass|secret|client[_-]?secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)\s+["']?)(?![-\[])[^\s"'&,;]+/gi, '$1[redacted]'],
 ];
 const redact = (text) => SECRETS.reduce((s, [pattern, replacement]) => s.replace(pattern, replacement), String(text));
 // Terminal escapes and other control characters never reach the page.
