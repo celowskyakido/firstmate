@@ -18,6 +18,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
+| Answering open captain calls from a Herdr tab | [Captain calls tab](#captain-calls-tab) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
@@ -162,6 +163,16 @@ It mints a replacement tab through this section's ordinary placement rules while
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
+
+### Captain calls tab
+
+`bin/fm-calls-herdr.sh` opens a focused tab labeled `calls` in this home's labeled workspace, creating that workspace when it is absent.
+The tab runs `bin/fm-calls.sh`, an fzf view of the open captain calls in which the captain can read each full question, answer it, defer it to a date, or refresh the list.
+Every answer and deferral is recorded through `bin/fm-captain-hold.sh`.
+Running the launcher again focuses the existing `calls` tab instead of opening a second one.
+Quitting the view closes the tab.
+The launcher refuses when the session's Herdr server is not running, and it never starts one.
+Both script headers own the exact behavior.
 
 ## Presentation spaces
 
@@ -860,6 +871,7 @@ tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-calls.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.
