@@ -1,4 +1,4 @@
-// Teams radar read for the radar producer: run with chrome-devtools evaluate_script via sourcePath on an already-open Teams tab.
+// Teams radar read: teams-scan.js runs this in the radar browser's Teams tab over CDP once the tab is ready.
 // Read-only: scrolls the left rail and reads the page's own IndexedDB cache. No clicks, no typing, no network.
 // Returns radar items without message bodies.
 async () => {
