@@ -53,4 +53,4 @@ const cancelItem = async ({ home, snapshot, id, reason, note, run = runScript(ho
   return result;
 };
 
-module.exports = { cancelItem };
+module.exports = { cancelItem, runScript };

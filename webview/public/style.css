@@ -344,3 +344,34 @@ dialog.confirm { margin: auto; height: fit-content; max-height: 85dvh; width: mi
 .chat-badge { text-decoration: none; position: relative; z-index: 1; }
 @media (max-width: 40rem) { .radar-item { grid-template-columns: 4rem minmax(0, 1fr); } }
 .radar button.small { font-size: .8125rem; padding: .2rem .6rem; }
+
+/* ---- decisions tab ---- */
+.decisions-page { display: grid; gap: .6rem; }
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; position: sticky; top: 0; z-index: 2; background: var(--page); padding: .5rem 0; }
+.select-all { display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; }
+.group-head { margin: .9rem 0 .2rem; font-size: .9375rem; }
+.decision-list { display: grid; gap: .6rem; }
+.decision.card { padding: .8rem 1rem .9rem 1.1rem; display: grid; gap: .5rem; }
+.decision.is-done { opacity: .75; }
+.decision-head { display: flex; gap: .6rem; align-items: baseline; }
+.decision-title { font-weight: 600; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+.decision-title:hover { text-decoration: underline; }
+.decision .card-meta { margin-top: 0; }
+.decision-summary { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; color: var(--ink-2); }
+.decision button, .bulk-bar button, .recent button, .quick-picks button { font: inherit; font-size: .8125rem; color: var(--ink); background: var(--card); border: 1px solid var(--hairline); border-radius: 6px; padding: .25rem .7rem; cursor: pointer; box-shadow: var(--shadow); }
+.decision button.danger, .bulk-bar button.danger { color: #fff; background: var(--danger); border: 0; box-shadow: none; }
+.decision button.primary { color: #fff; background: var(--link); border: 0; box-shadow: none; font-weight: 600; }
+.decision button:disabled, .bulk-bar button:disabled, .recent button:disabled { opacity: .5; cursor: not-allowed; }
+.decision button[aria-pressed="true"] { outline: 2px solid var(--focus); outline-offset: 1px; font-weight: 600; }
+.answer-box, .defer-box, .settle-box { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; border-top: 1px solid var(--hairline); padding-top: .5rem; }
+.answer-box .options { display: flex; flex-wrap: wrap; gap: .35rem; width: 100%; }
+.answer-box .options button { text-align: left; white-space: pre-wrap; }
+.answer-text { flex: 1 1 18rem; min-width: 0; box-sizing: border-box; font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--hairline); border-radius: 6px; padding: .35rem .5rem; }
+.decision select, .defer-date { font: inherit; font-size: .875rem; color: var(--ink); background: var(--card); border: 1px solid var(--hairline); border-radius: 6px; padding: .25rem .4rem; }
+.quick-picks { display: inline-flex; gap: .3rem; flex-wrap: wrap; }
+.effect { flex: 1 1 100%; margin: 0; font-size: .8125rem; color: var(--muted); }
+.result-ok { background: var(--ok-bg); border-left: 4px solid var(--working); border-radius: 6px; padding: .4rem .7rem; margin: 0; }
+.recent-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .35rem; }
+.recent-list li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; border-radius: 6px; padding: .3rem .6rem; }
+.confirm-titles { margin: .5rem 0; padding-left: 1.2rem; font-size: .875rem; }
+.quick-picks button.small { font-size: .8125rem; }
