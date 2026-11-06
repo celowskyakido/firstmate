@@ -588,6 +588,40 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
+# Every GitHub PR-based ship brief carries the PR-title rule so the pipeline's
+# conventional title rewrite cannot silently fail a Jira-key title check; a
+# branch-only delivery, a non-GitHub forge, and a scout open no GitHub PR.
+test_pr_title_discipline_section() {
+  local home brief out status
+  home="$TMP_ROOT/pr-title-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-title-$mode" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/brief-title-$mode/brief.md"
+    assert_grep "# PR title discipline" "$brief" "$mode: ship brief missing the PR title discipline section"
+    assert_grep "take it from your branch name or the task text" "$brief" "$mode: keyless brief lost the key fallback"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'immediately run `gh pr view <number> --json title`' "$brief" "$mode: brief lost the post-push title check"
+    assert_grep "resolved by restoring the title, never by code changes" "$brief" "$mode: brief lost the reset-title finding rule"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-title-key some-proj --mode direct-PR --jira-key CDP-42 >/dev/null 2>&1
+  brief="$home/data/brief-title-key/brief.md"
+  assert_grep "This task's Jira key is \`CDP-42\`." "$brief" "--jira-key was not printed in the section"
+  assert_grep "gh pr edit <number> --title 'CDP-42: ...'" "$brief" "--jira-key was not used in the restore command"
+  assert_no_grep "take it from your branch name" "$brief" "keyed brief still carries the keyless fallback"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-title-local some-proj --mode local-only >/dev/null 2>&1
+  assert_no_grep "PR title discipline" "$home/data/brief-title-local/brief.md" "local-only brief must not carry the PR title rule"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-title-scout some-proj --scout >/dev/null 2>&1
+  assert_no_grep "PR title discipline" "$home/data/brief-title-scout/brief.md" "scout brief must not carry the PR title rule"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-title-x1 some-proj --scout --jira-key CDP-1 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "--jira-key on a scout brief was accepted"
+  assert_contains "$out" "--jira-key applies only to GitHub PR-based ship briefs" "scout --jira-key refusal did not explain why"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-title-x2 some-proj --mode direct-PR --jira-key "CDP-1'; rm" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a shell-unsafe --jira-key was accepted"
+  assert_contains "$out" "--jira-key must look like ABC-123" "malformed --jira-key refusal did not explain why"
+  pass "fm-brief.sh: GitHub PR-based ship briefs carry PR title discipline; local-only and scout do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1556,6 +1590,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_pr_title_discipline_section
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

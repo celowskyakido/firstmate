@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo> [--shape squash]] [--jira-key <KEY>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -81,6 +81,13 @@
 # membership pinned when its watch is armed, because the merge watch follows one
 # change.
 # It defaults to squash on gerrit and is refused without it.
+# A GitHub PR-based ship brief (--mode no-mistakes or direct-PR on the default
+# forge) carries a "PR title discipline" section: the title must open with the
+# task's Jira key and a colon, which the no-mistakes pipeline's conventional
+# title rewrite on push, respond, and rerun would otherwise strip and fail a
+# repository's Jira-key title check. --jira-key <KEY> (e.g. ABC-123) names the
+# key in that section; without it the worker takes the key from the branch name
+# or task text. --jira-key is refused wherever the section is not rendered.
 # --upstream-consent <host>/<owner>/<repo> records the captain's one-off
 # approval for this one task to publish to that repository when it is
 # firstmate's own upstream. It renders as an `upstream-consent=` token on the
@@ -222,6 +229,8 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+JIRA_KEY=
+JIRA_KEY_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -237,6 +246,7 @@ for a in "$@"; do
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      jira-key) JIRA_KEY=$a; JIRA_KEY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -261,6 +271,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --jira-key) want_value="jira-key" ;;
+    --jira-key=*) JIRA_KEY=${a#--jira-key=}; JIRA_KEY_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -326,6 +338,18 @@ if [ "$KIND" = ship ]; then
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+HAS_PR_TITLE_RULE=0
+[ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$FORGE" = none ] && HAS_PR_TITLE_RULE=1
+if [ "$JIRA_KEY_SET" -eq 1 ]; then
+  [ "$HAS_PR_TITLE_RULE" -eq 1 ] || {
+    echo "error: --jira-key applies only to GitHub PR-based ship briefs (--mode no-mistakes or direct-PR on the default forge)" >&2
+    exit 1
+  }
+  printf '%s' "$JIRA_KEY" | grep -Eqx '[A-Z][A-Z0-9]*-[0-9]+' || {
+    echo "error: --jira-key must look like ABC-123 (got '$JIRA_KEY')" >&2
+    exit 1
+  }
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   if [ "$KIND" = secondmate ] || [ -z "$BASE_BRANCH" ]; then
@@ -741,6 +765,25 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
+PR_TITLE_SECTION=
+if [ "$HAS_PR_TITLE_RULE" -eq 1 ]; then
+  if [ -n "$JIRA_KEY" ]; then
+    KEY_LINE="This task's Jira key is \`$JIRA_KEY\`."
+    KEY=$JIRA_KEY
+  else
+    KEY_LINE="No Jira key was passed; take it from your branch name or the task text."
+    KEY='<KEY>'
+  fi
+  IFS= read -r -d '' PR_TITLE_SECTION <<EOF || true
+
+# PR title discipline
+The PR title must start with the task's Jira key and a colon, such as \`$KEY: add retry to sync\`. $KEY_LINE
+The no-mistakes pipeline rewrites the title to a conventional \`feat:\`/\`fix:\` form on every push, respond, and rerun, which fails the repository's Jira-key title check such as \`validate-jira\`.
+After every pipeline push, respond, or rerun, immediately run \`gh pr view <number> --json title\` and restore the key with \`gh pr edit <number> --title '$KEY: ...'\` before waiting on CI; never report the PR ready until its title carries the key.
+A \`validate-jira\` ask-user finding caused only by a reset title is resolved by restoring the title, never by code changes.
+EOF
+  PR_TITLE_SECTION=${PR_TITLE_SECTION%$'\n'}
+fi
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT") || exit 1
 
@@ -793,6 +836,7 @@ $WAIT_BLOCK$INBOX_SECTION
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
+$PR_TITLE_SECTION
 
 $DOD
 EOF
