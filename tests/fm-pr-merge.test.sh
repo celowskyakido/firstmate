@@ -211,6 +211,11 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_HEAD"
         exit 0
         ;;
+      *autoMergeRequest*)
+        [ ! -f "${FM_TEST_GH_AUTO_READ_FAIL:-}" ] || exit 1
+        cat "$FM_TEST_GH_AUTO_ARMED" 2>/dev/null || echo false
+        exit 0
+        ;;
       *isDraft*)
         cat "$FM_TEST_GH_VIEW_JSON"
         exit 0
@@ -218,6 +223,13 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "pr merge")
+    case " $* " in
+      *" --disable-auto "*)
+        [ ! -f "${FM_TEST_GH_DISABLE_FAIL:-}" ] || exit 1
+        echo false > "$FM_TEST_GH_AUTO_ARMED"
+        exit 0
+        ;;
+    esac
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
       cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     fi
@@ -674,6 +686,9 @@ run_pr_merge() {
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
+  FM_TEST_GH_AUTO_ARMED="$case_dir/github-auto-armed" \
+  FM_TEST_GH_AUTO_READ_FAIL="$case_dir/github-auto-read-fail" \
+  FM_TEST_GH_DISABLE_FAIL="$case_dir/github-disable-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
@@ -2922,6 +2937,139 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+# On a merge-queue base, gh turns a merge without --auto into an auto-merge
+# request that GitHub arms while an approval is pending. The case below has the
+# forge report auto-merge armed after a plain merge call, the way it did when
+# such a request later merged without the captain's word.
+arm_github_auto_merge_case() {
+  local name=$1 head=$2 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_outcome "$case_dir" OPEN false false main
+  echo true > "$case_dir/github-auto-armed"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+  printf '%s\n' "$case_dir"
+}
+
+test_github_refused_queue_merge_disarms_unrequested_auto_merge() {
+  local case_dir rc
+  case_dir=$(arm_github_auto_merge_case github-queue-disarms 3131313131313131313131313131313131313131)
+  printf 'merge_method=SQUASH\n' > "$case_dir/github-rules"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-queue-disarms: an unproved merge must fail"
+  assert_grep 'base branch main requires the merge queue' "$case_dir/stderr" \
+    "github-queue-disarms: the queue refusal was lost"
+  assert_grep 'pr merge 71 --repo example/repo --disable-auto' "$case_dir/gh.log" \
+    "github-queue-disarms: the armed auto-merge was not disabled"
+  assert_grep 'false' "$case_dir/github-auto-armed" \
+    "github-queue-disarms: auto-merge is still armed after the refusal"
+  assert_grep 'armed auto-merge on https://github.com/example/repo/pull/71 without --auto; it has been disabled' \
+    "$case_dir/stderr" "github-queue-disarms: the refusal did not say it disabled auto-merge"
+  pass "fm-pr-merge disables an auto-merge its refused queue merge armed"
+}
+
+test_github_explicit_auto_keeps_auto_merge_armed() {
+  local case_dir rc
+  case_dir=$(arm_github_auto_merge_case github-explicit-auto-stays 3232323232323232323232323232323232323232)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    --attended-override -- --auto --squash \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-explicit-auto-stays: an armed but unlanded auto-merge still reports not landed"
+  assert_grep 'auto-merge was requested and armed' "$case_dir/stderr" \
+    "github-explicit-auto-stays: the requested auto-merge was not explained"
+  assert_no_grep '--disable-auto' "$case_dir/gh.log" \
+    "github-explicit-auto-stays: a captain-requested auto-merge was disabled"
+  assert_grep 'true' "$case_dir/github-auto-armed" \
+    "github-explicit-auto-stays: a captain-requested auto-merge did not stay armed"
+  pass "fm-pr-merge keeps an explicitly requested auto-merge armed"
+}
+
+test_github_away_refusal_disarms_unrequested_auto_merge() {
+  local case_dir rc
+  case_dir=$(arm_github_auto_merge_case github-away-disarms 3333333333333333333333333333333333333333)
+  write_away_record "$case_dir"
+
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-away-disarms: an unproved merge must fail"
+  assert_grep 'the direct merge did not land while the away-posture record exists' "$case_dir/stderr" \
+    "github-away-disarms: the away refusal was lost"
+  assert_grep 'pr merge 73 --repo example/repo --disable-auto' "$case_dir/gh.log" \
+    "github-away-disarms: the armed auto-merge was not disabled while away"
+  assert_grep 'false' "$case_dir/github-auto-armed" \
+    "github-away-disarms: auto-merge is still armed after the away refusal"
+  pass "fm-pr-merge disables an auto-merge its refused merge armed while away"
+}
+
+test_github_refusal_leaves_preexisting_auto_merge_alone() {
+  local case_dir rc
+  case_dir=$(arm_github_auto_merge_case github-preexisting-auto 3434343434343434343434343434343434343434)
+  jq -c '.autoMergeRequest = {"mergeMethod":"SQUASH"}' "$case_dir/github-view.json" > "$case_dir/view.tmp"
+  mv "$case_dir/view.tmp" "$case_dir/github-view.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-preexisting-auto: an unproved merge must fail"
+  assert_no_grep '--disable-auto' "$case_dir/gh.log" \
+    "github-preexisting-auto: an auto-merge armed before this run was disabled"
+  pass "fm-pr-merge leaves an auto-merge armed before its own call untouched"
+}
+
+test_github_unconfirmed_disarm_is_reported() {
+  local case_dir rc
+  case_dir=$(arm_github_auto_merge_case github-disarm-fails 3535353535353535353535353535353535353535)
+  : > "$case_dir/github-disable-fail"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/75 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-disarm-fails: an unproved merge must fail"
+  assert_grep 'disabling it could not be confirmed; run gh pr merge 75 --repo example/repo --disable-auto' \
+    "$case_dir/stderr" "github-disarm-fails: a failed disarm was not reported"
+
+  case_dir=$(arm_github_auto_merge_case github-auto-unreadable 3636363636363636363636363636363636363636)
+  : > "$case_dir/github-auto-read-fail"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/76 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-auto-unreadable: an unproved merge must fail"
+  assert_grep 'whether auto-merge is armed on https://github.com/example/repo/pull/76 could not be read' \
+    "$case_dir/stderr" "github-auto-unreadable: an unreadable auto-merge state was not reported"
+  pass "fm-pr-merge reports an auto-merge it could not confirm disabled"
+}
+
+test_github_refused_queue_merge_disarms_unrequested_auto_merge
+test_github_explicit_auto_keeps_auto_merge_armed
+test_github_away_refusal_disarms_unrequested_auto_merge
+test_github_refusal_leaves_preexisting_auto_merge_alone
+test_github_unconfirmed_disarm_is_reported
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance

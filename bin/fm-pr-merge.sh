@@ -82,6 +82,14 @@
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
 # was only requested; both are read from the caller's own arguments rather than
 # from the forge's prose.
+# gh turns a merge without --auto into an auto-merge request on a merge-queue
+# base, and GitHub arms it while an approval or other requirement is pending.
+# So every GitHub refusal after the forge call reads the pull request's
+# auto-merge state and, when this call armed it without a caller --auto and it
+# was not already armed before the call, disables it with --disable-auto and
+# says so; a disarm it cannot confirm, or a state it cannot read, is reported
+# with the exact command to run, so a merge reported as not done never lands
+# later on its own.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -401,6 +409,7 @@ reject_head_overrides "$@" || exit 1
 reject_protected_forge_args "$@" || exit 1
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
+FM_PR_GITHUB_AUTO_ARMED_BEFORE=false
 if [ "$PROVIDER" = github ] && caller_requested_auto_merge "$@"; then
   FM_PR_GITHUB_AUTO_REQUESTED=true
 fi
@@ -971,9 +980,9 @@ github_required_checks_missing() {
 github_verify_mergeable() {
   local json fields line red name covered missing unreported producers runs
   local total=0 named=0 refusals='' mergeable_refusal=''
-  local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local state='' draft='' mergeable='' merge_state='' live_head='' base='' auto_armed=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup,autoMergeRequest 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -984,7 +993,8 @@ github_verify_mergeable() {
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
-        "base=" + ((.baseRefName // "") | tostring)
+        "base=" + ((.baseRefName // "") | tostring),
+        "auto_armed=" + ((.autoMergeRequest != null) | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -999,13 +1009,14 @@ github_verify_mergeable() {
       merge_state=*) merge_state=${line#merge_state=} ;;
       head=*) live_head=${line#head=} ;;
       base=*) base=${line#base=} ;;
+      auto_armed=*) auto_armed=${line#auto_armed=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
+  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$base" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
@@ -1110,6 +1121,7 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_AUTO_ARMED_BEFORE=$auto_armed
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1558,6 +1570,35 @@ github_report_unmerged_outcome() {
   github_report_queue_rules
 }
 
+# The header's merge-queue auto-merge paragraph owns why a refusal disarms.
+github_read_auto_armed() {
+  gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --json autoMergeRequest \
+    --jq '.autoMergeRequest != null' 2>/dev/null
+}
+
+github_disarm_unrequested_auto_merge() {
+  local armed
+  [ "$FM_PR_GITHUB_AUTO_REQUESTED" = false ] && [ "$FM_PR_GITHUB_AUTO_ARMED_BEFORE" = false ] || return 0
+  armed=$(github_read_auto_armed) || armed=unreadable
+  case "$armed" in
+    false) return 0 ;;
+    true)
+      if gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 \
+        && [ "$(github_read_auto_armed)" = false ]; then
+        printf 'error: this run'"'"'s merge request armed auto-merge on %s without --auto; it has been disabled, so nothing will merge later without a new request\n' \
+          "$URL" >&2
+        return 0
+      fi
+      printf 'error: this run'"'"'s merge request armed auto-merge on %s without --auto, and disabling it could not be confirmed; run gh pr merge %s --repo %s --disable-auto before GitHub merges it unasked\n' \
+        "$URL" "$PR_NUMBER" "$PR_OWNER/$PR_REPO" >&2
+      ;;
+    *)
+      printf 'error: whether auto-merge is armed on %s could not be read after the refused merge; check it and run gh pr merge %s --repo %s --disable-auto if it is\n' \
+        "$URL" "$PR_NUMBER" "$PR_OWNER/$PR_REPO" >&2
+      ;;
+  esac
+}
+
 gitlab_confirm_merged() {
   local json state
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
@@ -1677,10 +1718,12 @@ case "$PROVIDER" in
             "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
         fi
       fi
+      github_disarm_unrequested_auto_merge
       exit "$merge_status"
     fi
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
+      github_disarm_unrequested_auto_merge
       exit 1
     fi
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
@@ -1693,6 +1736,7 @@ case "$PROVIDER" in
     else
       github_report_forge_output "$merge_output"
       github_report_unmerged_outcome
+      github_disarm_unrequested_auto_merge
       exit 1
     fi
     ;;
